@@ -57,7 +57,10 @@ export async function createPersonalApp(options: AppOptions) {
       changed();
     };
   }
-  if (identity) runtime.memory.ledger.authorizeWork = () => identity.authorizeTask({ authorized_session_id: store.session });
+  if (identity) {
+    runtime.memory.ledger.authorizeWork = () => identity.authorizeTask({ authorized_session_id: store.session });
+    runtime.memory.personal.authorize = () => identity.authorizeTask({ authorized_session_id: store.session });
+  }
   const memoryPlugin = new ExternalMemoryPlugin(store, runtime.memory.ledger, changed);
 
   const agents = new AgentModule(store, runtime);
@@ -234,12 +237,19 @@ export async function createPersonalApp(options: AppOptions) {
         const view = url.searchParams.get("view") === "summary" ? "summary" : "full";
         json(response, 200, stateBody(view, requestOrigin)); return;
       }
+      if (url.pathname === "/api/agents/search" && request.method === "GET") {
+        if(session.user_id!==store.owner){json(response,403,{error:'此账号没有搜索会话的权限'});return;}
+        const result=agents.searchConversations(text(url.searchParams.get('q'),200),url.searchParams.has('before')?Number(url.searchParams.get('before')):undefined);
+        json(response,200,{...result,sync:sync.snapshot()});return;
+      }
       if (url.pathname === "/api/agents/messages" && request.method === "GET") {
         const botId = text(url.searchParams.get("bot"), 100), before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined;
         if (before !== undefined && (!Number.isSafeInteger(before) || before <= 0)) throw new Error("消息位置无效");
         const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : undefined;
         if (after !== undefined && (!Number.isSafeInteger(after) || after < 0 || before !== undefined)) throw new Error("消息位置无效");
-        const messages = after === undefined ? agents.messages(botId, before) : agents.messagesAfter(botId, after);
+        const around=url.searchParams.get('around');
+        if(around&&(before!==undefined||after!==undefined))throw new Error('消息位置无效');
+        const messages = around ? agents.messagesAround(botId,text(around,100)) : after === undefined ? agents.messages(botId, before) : agents.messagesAfter(botId, after);
         json(response, 200, { sync: sync.snapshot(), messages, hasMore: after !== undefined && messages.length === 200, streaming: [...runtime.workers.values()].filter((w) => store.get("SELECT bot_id FROM tasks WHERE id=?", w.taskId)?.bot_id === botId).map((w) => ({ taskId: w.taskId, text: w.streaming })) }); return;
       }
       if (url.pathname === "/api/messages" && request.method === "GET") {
@@ -323,6 +333,10 @@ export async function createPersonalApp(options: AppOptions) {
         const automatic = store.modelLimits.resolve(scope, { contextWindow: null, maxOutputTokens: null });
         json(response, 200, { ...store.modelLimitSettings(scope), automatic, refresh }); return;
       }
+      if (url.pathname === "/api/models/visibility") {
+        if (session.user_id !== store.owner) { json(response, 403, { error: "此账号没有修改模型配置的权限" }); return; }
+        const result = store.saveModelVisibility(data); changed(); json(response, 200, result); return;
+      }
       if (url.pathname === "/api/models/list") {
         if (session.user_id !== store.owner) { json(response, 403, { error: "此账号没有读取模型列表的权限" }); return; }
         const settings = catalogSettings(data, store.config() ? store.modelConfig() : undefined);
@@ -346,6 +360,18 @@ export async function createPersonalApp(options: AppOptions) {
       if (url.pathname === "/api/resume") { runtime.resume(text(data.taskId, 100)); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/approvals") { runtime.decide(text(data.id, 100), text(data.hash, 100), data.allow === true, String(session.id)); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/memory") { const result = runtime.memory.write(text(data.botId, 100), data); changed(); json(response, 200, result); return; }
+      if(url.pathname==='/api/memory/settings'){
+        if(session.user_id!==store.owner){json(response,403,{error:'此账号没有修改记忆设置的权限'});return;}
+        if(data.botId){throw new Error('记忆已改为统一开关，请更新客户端后设置');}
+        json(response,200,runtime.memory.personal.saveGlobal(data));return;
+      }
+      if(url.pathname==='/api/memory/summary'){
+        if(session.user_id!==store.owner){json(response,403,{error:'此账号没有读取记忆用量的权限'});return;}
+        json(response,200,runtime.memory.personal.summary());return;
+      }
+      if(url.pathname==='/api/memory/monitor'){json(response,200,runtime.memory.personal.monitor(text(data.botId,100),[1,7,30].includes(Number(data.days))?Number(data.days):7));return;}
+      if(url.pathname==='/api/memory/import'){if(data.fromTime!==undefined)runtime.memory.personal.importDates(text(data.botId,100),Number(data.fromTime),Number(data.toTime));else runtime.memory.personal.importHistory(text(data.botId,100),Number(data.from),Number(data.to));json(response,200,{queued:true});return;}
+      if(url.pathname==='/api/history/search'){json(response,200,agents.search(text(data.botId,100),text(data.query,200)));return;}
       if (url.pathname === "/api/memory/delete") { runtime.memory.remove(text(data.id, 100), Number(data.version)); changed(); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/memory/reflect") { const result = await runtime.memory.reflect(text(data.botId, 100), text(data.query, 1000)); json(response, 200, result); return; }
       if (url.pathname === "/api/memory/recall") { json(response, 200, await runtime.memory.recall(text(data.botId, 100), text(data.query, 200))); return; }
@@ -353,7 +379,7 @@ export async function createPersonalApp(options: AppOptions) {
       if (url.pathname === "/api/memory/publish") { json(response, 200, runtime.memory.publish(text(data.botId, 100), text(data.ref, 100), text(data.sourceHash, 100), text(data.intent, 200))); changed(); return; }
       if (url.pathname === "/api/memory/forget-preview") { json(response, 200, runtime.memory.privacy.preview(text(data.botId, 100), data)); return; }
       if (url.pathname === "/api/memory/forget") { json(response, 200, runtime.memory.forget(text(data.botId, 100), data, text(data.revision, 100))); changed(); return; }
-      if (url.pathname === "/api/devices") { json(response, 200, gateway.pair(text(data.name, 80))); return; }
+      if (url.pathname === "/api/devices") { json(response, 200, gateway.pair(text(data.name, 80), String(session.id))); return; }
       if (url.pathname === "/api/devices/revoke") { gateway.revoke(text(data.id, 100)); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/node" || url.pathname === "/api/node/reconcile") {
         if (options.hostDevice === false || !loopback || (!identity && session.id !== store.session)) { json(response, 403, { error: "此账号没有配置后端设备能力的权限" }); return; }
@@ -396,6 +422,7 @@ export async function createPersonalApp(options: AppOptions) {
   if (options.hindsight) runtime.memory.ledger.client = new HindsightClient(options.hindsight.endpoint, options.hindsight.token);
   if (!options.hindsight) memoryPlugin.start();
   runtime.memory.ledger.start();
+  runtime.memory.personal.start();
   runtime.startRecovered();
   routines.start();
   return { server, store, runtime, agents, routines, gateway, node, memoryPlugin, identity, origin, handleRequest: route, changed, setRequestRouter(router: typeof requestRouter) { requestRouter = router; }, async close() {
@@ -405,6 +432,7 @@ export async function createPersonalApp(options: AppOptions) {
     await heartbeatJob;
     routines.close();
     await connectors.close(); await memoryPlugin.close();
+    await runtime.memory.personal.close();
     await runtime.memory.ledger.close();
     gateway.close(); await node.close(); for (const response of streams.keys()) response.end();
     await runtime.close(); await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }); store.close();

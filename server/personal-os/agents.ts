@@ -2,6 +2,8 @@ import { CoreStore, hash, id, now, optionalText, text, type Row } from "./store.
 import type { TaskRuntime } from "./runtime.ts";
 import { actions, policyTools } from "./policy.ts";
 import { parseAppearance } from "../../shared/personal-appearance.ts";
+import { tokens } from './token-estimate.ts';
+import { relevance } from './assistant-memory.ts';
 
 // The contact and its inbox survive any number of execution contexts. Pi
 // sessions belong to work, and never define the identity visible to the owner.
@@ -161,7 +163,10 @@ export class AgentModule {
     const accepted = this.store.transaction(() => {
       const receipt = this.store.get("SELECT * FROM agent_input_receipts WHERE bot_id=? AND client_message_id=?", botId, clientId);
       if (receipt) { if (receipt.request_hash !== digest) throw new Error("同一消息 ID 的内容不同"); return { taskId: String(receipt.task_id), conversationId: String(receipt.conversation_id), replay: true }; }
-      const active = this.active(botId), conversationId = active ? String(active.conversation_id) : this.store.createConversation(botId, "Agent 工作上下文");
+      const active = this.active(botId);
+      const bound = this.store.get("SELECT a.conversation_id FROM assistant_conversations a JOIN conversations c ON c.id=a.conversation_id WHERE a.bot_id=? AND c.status='open'", botId);
+      const conversationId = active ? String(active.conversation_id) : bound ? String(bound.conversation_id) : this.store.createConversation(botId, "连续对话");
+      if (!active) this.store.run("INSERT INTO assistant_conversations VALUES(?,?) ON CONFLICT(bot_id) DO UPDATE SET conversation_id=excluded.conversation_id", botId, conversationId);
       const taskId = this.store.accept(conversationId, content, clientId, sessionId);
       this.store.run("INSERT OR IGNORE INTO agent_task_links VALUES(?,?,?,?)", taskId, botId, "owner", `owner-task:${taskId}`);
       this.store.insert("agent_input_receipts", { bot_id: botId, client_message_id: clientId, request_hash: digest, task_id: taskId, conversation_id: conversationId });
@@ -243,13 +248,52 @@ export class AgentModule {
     }
   }
   context(botId: string, taskId: string) {
-    const history = this.store.all("SELECT role,kind,content FROM agent_messages WHERE bot_id=? AND (task_id IS NULL OR task_id!=?) ORDER BY seq DESC LIMIT 12", botId, taskId).reverse();
-    const journal = this.store.all("SELECT objective,result FROM agent_journal WHERE bot_id=? AND task_id!=? ORDER BY created_at DESC LIMIT 3", botId, taskId);
-    return JSON.stringify({ recentMessages: history.map((m) => ({ ...m, content: String(m.content).slice(0, 800) })), completedWork: journal.map((j) => ({ objective: String(j.objective).slice(0, 300), result: String(j.result).slice(0, 1500) })) });
+    const conversation = this.store.get('SELECT conversation_id FROM tasks WHERE id=?',taskId)?.conversation_id;
+    const checkpoint = this.store.get('SELECT id,summary FROM context_checkpoints WHERE bot_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 1',botId,conversation ?? null);
+    // Full recent turns live in the persistent Pi projection. Only other work
+    // needs an index here; never duplicate or mechanically clip current turns.
+    const history = this.store.all("SELECT m.id,m.role,m.content FROM agent_messages m LEFT JOIN tasks t ON t.id=m.task_id WHERE m.bot_id=? AND (t.conversation_id IS NULL OR t.conversation_id!=?) ORDER BY m.seq DESC",botId,conversation ?? null);
+    let remaining=2000; const recent: Row[]=[];
+    for(const row of history){ const size=tokens(row);if(size>remaining)continue;recent.unshift(row);remaining-=size; }
+    const query=String(this.store.get("SELECT content FROM agent_messages WHERE bot_id=? AND role='user' ORDER BY seq DESC LIMIT 1",botId)?.content??'');
+    const references=query.match(/(?:message|entry):[a-zA-Z0-9-]+/g)??[];
+    const recalled:Row[]=[];let budget=2500;
+    const matches=references.flatMap(ref=>this.search(botId,ref));
+    if(/之前|上次|此前|以前|原来|早先|previous|earlier/i.test(query))matches.push(...this.store.all("SELECT id,content,role FROM agent_messages WHERE bot_id=? AND task_id IS NOT ? AND content!='[已遗忘]'",botId,taskId).map(row=>({...row,score:relevance(query,String(row.content))})).filter(row=>row.score>0).sort((a,b)=>b.score-a.score));
+    for(const row of matches){const size=tokens(row);if(size>budget||recalled.some(prior=>prior.id===row.id))continue;recalled.push(row);budget-=size;}
+    const note=this.store.get('SELECT content,version FROM assistant_working_notes WHERE bot_id=?',botId);
+    return JSON.stringify({ checkpoint:checkpoint?.id??null,workingNote:note??null,otherRecentWork:recent,recalledHistory:recalled,history:'通过 memory.search 搜索早期原文；query="message:<id>" 可展开消息，query="entry:<id>" 可展开运行记录。' });
   }
   search(botId: string, query: string) {
+    if(query.startsWith('message:')) return this.store.all('SELECT id,role,content,created_at FROM agent_messages WHERE bot_id=? AND id=?',botId,query.slice(8));
+    if(query.startsWith('entry:')) {
+      const entryId=query.slice(6);
+      for(const session of this.store.all('SELECT id FROM runtime_sessions WHERE bot_id=?',botId)) {
+        const entry=this.runtime.projection.load(String(session.id))?.find(entry=>entry.type!=='session'&&entry.id===entryId);
+        if(entry)return [{id:entryId,content:JSON.stringify(entry)}];
+      }
+      return [];
+    }
     const needle = "%" + text(query, 200).replace(/[\\%_]/g, "\\$&") + "%";
-    return this.store.all("SELECT role,kind,substr(content,1,4000) content,created_at FROM agent_messages WHERE bot_id=? AND content LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT 10", botId, needle);
+    return this.store.all("SELECT id,role,kind,content,created_at FROM agent_messages WHERE bot_id=? AND content LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT 10", botId, needle);
+  }
+  searchConversations(query: string, before?: number) {
+    const value = text(query,200), needle = '%' + value.replace(/[\\%_]/g,'\\$&') + '%';
+    if (before!==undefined && (!Number.isSafeInteger(before)||before<=0)) throw new Error('搜索位置无效');
+    const rows = this.store.all("SELECT m.rowid position,m.id,m.bot_id,m.seq,m.content,m.created_at,b.name bot_name FROM agent_messages m JOIN bots b ON b.id=m.bot_id WHERE b.workspace_id=? AND b.owner_user_id=? AND b.status='active' AND m.rowid<? AND m.content<>'[已遗忘]' AND NOT EXISTS(SELECT 1 FROM memory_forgotten_tasks f WHERE f.task_id=m.task_id) AND m.content LIKE ? ESCAPE '\\' ORDER BY m.rowid DESC LIMIT 51",this.store.workspace,this.store.owner,before??Number.MAX_SAFE_INTEGER,needle);
+    const page=rows.slice(0,50);
+    return { results:page.map(row=>{
+      const content=String(row.content),index=content.toLowerCase().indexOf(value.toLowerCase()),start=Math.max(0,index-45);
+      return {id:row.id,botId:row.bot_id,botName:row.bot_name,createdAt:row.created_at,snippet:(start?'…':'')+content.slice(start,start+180)+(content.length>start+180?'…':'')};
+    }), nextBefore:rows.length>50?Number(page.at(-1)!.position):null };
+  }
+  messagesAround(botId: string, messageId: string) {
+    this.ensure(botId);
+    const target=this.store.get("SELECT seq FROM agent_messages m WHERE bot_id=? AND id=? AND content<>'[已遗忘]' AND NOT EXISTS(SELECT 1 FROM memory_forgotten_tasks f WHERE f.task_id=m.task_id)",botId,messageId);
+    if (!target) throw new Error('该消息已不存在或已遗忘');
+    const before=this.store.all('SELECT * FROM (SELECT * FROM agent_messages WHERE bot_id=? AND seq<? ORDER BY seq DESC LIMIT 40) ORDER BY seq',botId,target.seq);
+    const after=this.store.all('SELECT * FROM agent_messages WHERE bot_id=? AND seq>=? ORDER BY seq LIMIT 60',botId,target.seq);
+    return this.projectMessages([...before,...after]);
   }
   read(botId: string, seq: number) {
     this.ensure(botId);

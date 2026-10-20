@@ -1,5 +1,18 @@
 # Composer menus — 2026-10-18
 
+## Current composer simplification
+
+The persistent permission and model buttons have been removed. Both controls
+are available only through the plus menu, which shows their current values.
+The model dialog is anchored to plus; selection and Escape restore focus there.
+The permission menu also anchors to plus. Settings-page model pickers keep
+their regular triggers. Build, lint and type checking passed; the isolated
+model-picker smoke covers the absent toolbar controls, permission persistence,
+model selection, Escape focus and mobile popover bounds.
+
+The records below describe earlier releases.
+
+
 The user selected existing functionality only. The permission control now uses a
 compact icon button and a rounded menu with a checkmark on the selected mode.
 It retains **Standard / Full access**, the existing server semantics; no
@@ -85,3 +98,18 @@ model overrides, model/memory configuration and record counts. Public HTTPS
 health returned 200; HTML and all three referenced assets matched; unauthenticated
 APIs returned 401. The service remained active with zero restarts. Private
 release evidence is under ignored `release/deployment-composer-menus/`.
+
+
+## Upstream sync verification — 2026-10-20
+
+Merged upstream main `ec007388` into the local workspace smoke branch, retaining
+assistant-scoped model selection, reload, Escape focus and default-reset checks.
+The smoke uses the current model picker's listbox options in both the composer
+and settings, including custom model entry and fetched model selection.
+
+Validation passed: TypeScript project and server checks, Core/UI build, targeted
+script lint, and all 38 cases in `node scripts/smoke-personal-workspace.mjs`.
+The run used a disposable Core and Electron profile with synthetic identity,
+model and MCP providers. It issued seven model requests and two fixture MCP
+calls. Evidence: ignored `release/workspace-verification-avatars/result.json`
+and its screenshots. No live account or application data was used.

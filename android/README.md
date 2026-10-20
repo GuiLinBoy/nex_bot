@@ -1,5 +1,36 @@
 # Android
 
+## 0.2.4 — conversation history search
+
+Search message content across assistants, paginate results and jump to older
+messages with their surrounding context. Requires the matching Core search API.
+Debug APK version code 204.
+
+## 0.2.3 — unified memory controls and simplified composer
+
+One memory switch and model apply to all assistants, with lifetime token totals.
+Composer permission/model controls are available through the plus menu.
+Requires matching Core schema 17. Debug APK version code 203.
+
+## 0.2.2 — context, personal memory and model shortlist
+
+Includes the shared searchable model picker, saved visible-model selection,
+optional assistant memory and monitoring. Requires the matching Core with
+schema 15. Retains the 0.2.1 WebView viewport fix. Debug APK version code 202.
+
+## 0.2.1 — blank screen and collapsed dialogs
+
+The Android WebView resolves every vertical viewport unit (`vh`, `dvh`, `svh`,
+`lvh`) to 0 px, so the workspace, sized with `100dvh`, collapsed: opening an
+assistant showed a blank page, and the account menu and the add-assistant dialog
+shrank to a sliver. `scripts/build-android-ui.mjs` now rewrites those units to a
+`--nex-vh` variable that the Android entry keeps equal to the visual viewport
+height (so it also follows the keyboard). Desktop builds are unchanged.
+
+A render error in the shared UI now shows the message, stack head and component
+path with retry, reload and copy actions instead of a blank page, and failures
+before React mounts are reported the same way.
+
 ## 0.2.0 — shared Windows workspace
 
 After native account sign-in, Android loads the same `src/personal` workspace
@@ -24,7 +55,7 @@ cd android
 ```
 
 Gradle builds the shared renderer automatically. Output:
-`app/build/outputs/apk/debug/nexbot-0.2.0-debug.apk`. This debug-signed APK updates
+`app/build/outputs/apk/debug/nexbot-0.2.4-debug.apk`. This debug-signed APK updates
 the previous debug installation without clearing login data. Release signing
 still requires a maintainer-provided key outside the repository.
 

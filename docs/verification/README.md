@@ -58,6 +58,7 @@ Use only mapped, tested commands:
 
 - [Chat turns](chat-turns.md)
 - [Conversation context compaction](context-compaction.md)
+- [Continuous personal context and assistant memory](continuous-context-memory.md)
 - [Per-model context and output limits](model-token-limits.md)
 - [Work summaries and engine hooks](digests.md)
 - [OpenAI-compatible structured tools](openai-tools.md)
@@ -257,6 +258,9 @@ desktop routing, cancellation, and computer authority cleanup.
 
 ## Evidence
 
+The [Apple chart release record](apple-chart-release.md) covers Mac/iOS 0.2.1
+compilation, isolated WebKit visual acceptance and published installer hashes.
+
 The [native macOS and iOS client recipe](native-clients.md) drives the SwiftUI apps
 against an isolated Core fixture.
 The [chat composer record](chat-composer.md) covers file uploads, per-assistant
@@ -330,3 +334,15 @@ printed path. Never kill processes by name and never delete a broad temp root.
 
 The [downloadable client preview](client-downloads.md) records the public
 Windows EXE and Android test APK artifacts and their installation checks.
+
+The [continuous context, memory and model picker release](context-memory-release.md)
+records the 0.9.2 Windows / 0.2.2 Android verification and production rollout.
+
+The [unified memory and composer release](unified-memory-release.md) records the
+0.9.3 Windows / 0.2.3 Android verification and schema 17 deployment.
+
+The [conversation history search fixture](conversation-search.md) covers shared
+desktop/mobile search, pagination and navigation to older messages.
+
+The [sending-device context check](sender-device.md) covers telling the assistant
+which client (and paired device) the user's latest message came from, via device.inventory.
