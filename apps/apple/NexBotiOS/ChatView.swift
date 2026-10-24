@@ -8,6 +8,8 @@ struct ChatView: View {
     @Environment(Navigation.self) private var nav
     @State private var errorText: String?
     @State private var quote: QuoteDraft?
+    @State private var modelChooserOpen = false
+    @State private var modelForm = ModelForm(config: nil)
     @State private var showRoutine = false
     @State private var composerMenu: ComposerMenu?
     @State private var showMemory = false
@@ -78,7 +80,7 @@ struct ChatView: View {
                         ThinkingIndicator(name: bot?.name ?? "Agent", phrase: tasks[0].phrase)
                     }
                     ForEach(approvals) { approval in
-                        ApprovalCard(approval: approval, botName: bot?.name ?? "") { allow in await decide(approval, allow: allow) }
+                        ApprovalCard(approval: approval, botName: bot?.name ?? "") { allow, remember in await decide(approval, allow: allow, remember: remember) }
                     }
                     ForEach(delegatedPeers, id: \.self) { peerID in delegatedLine(peerID) }
                     Color.clear.frame(height: 1).id(bottomID)
@@ -112,9 +114,17 @@ struct ChatView: View {
                     .transition(.opacity)
                 }
             }
-            .onChange(of: conv.messages.last?.seq) { if focusedID == nil { scrollToBottom(proxy) } }
-            .onChange(of: conv.streaming) { if focusedID == nil { scrollToBottom(proxy) } }
-            .onChange(of: approvals.count) { if focusedID == nil { scrollToBottom(proxy) } }
+            .onChange(of: conv.messages.last?.seq) { if focusedID == nil && atBottom { proxy.scrollTo(bottomID, anchor: .bottom) } }
+            .onChange(of: conv.streaming) { if focusedID == nil && atBottom { proxy.scrollTo(bottomID, anchor: .bottom) } }
+            .onChange(of: approvals.count) { if focusedID == nil && atBottom { proxy.scrollTo(bottomID, anchor: .bottom) } }
+            .onChange(of: conv.sendRevision) {
+                atBottom = true; proxy.scrollTo(bottomID, anchor: .bottom)
+            }
+            .task(id: "\(botID)|\(conv.isLoaded)") {
+                guard conv.isLoaded, focusedID == nil else { return }
+                atBottom = true
+                proxy.scrollTo(bottomID, anchor: .bottom)
+            }
             .task(id: focusKey) { await scrollToFocused(proxy) }
             .debugCommand { command, arg in
                 switch command {
@@ -144,7 +154,7 @@ struct ChatView: View {
             }
             return Markdown.isOpenable(url) ? .systemAction : .discarded
         })
-        .background(Theme.background)
+        .background { WorkspaceSurface(kind: .reading) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
         .toolbarBackground(Theme.background, for: .navigationBar)
@@ -239,11 +249,17 @@ struct ChatView: View {
     // MARK: Banners
 
     private var noModelBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.approval)
-            Text(ToolLabels.noModelBanner).font(.footnote).lineLimit(2)
-            Spacer(minLength: 4)
-            Button("配置 API Key") { nav.openSettings(.model) }.buttonStyle(PillButtonStyle(primary: true))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.approval)
+                Text(ToolLabels.noModelBanner).font(.footnote).lineLimit(2)
+                Spacer(minLength: 4)
+                Button("选择模型") { modelChooserOpen.toggle() }.buttonStyle(PillButtonStyle(primary: true))
+            }
+            if modelChooserOpen {
+                ScrollView { SettingsModelView(workspace: workspace, form: modelForm).padding(14) }
+                    .frame(maxHeight: 320)
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .frame(maxWidth: .infinity).background(Theme.approvalSoft)
@@ -305,6 +321,7 @@ struct ChatView: View {
     // MARK: Actions
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        atBottom = true
         withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(bottomID, anchor: .bottom) }
     }
 
@@ -314,8 +331,8 @@ struct ChatView: View {
         if let anchor { proxy.scrollTo(anchor, anchor: .top) }
     }
 
-    private func decide(_ approval: Approval, allow: Bool) async {
-        do { try await workspace.decide(approval, allow: allow) } catch { errorText = message(of: error) }
+    private func decide(_ approval: Approval, allow: Bool, remember: Bool = false) async {
+        do { try await workspace.decide(approval, allow: allow, remember: remember) } catch { errorText = message(of: error) }
     }
 
     /// Opens a file chip's preview in the detail 工作 tab.
