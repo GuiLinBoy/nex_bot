@@ -71,7 +71,6 @@ try {
   await click(".workspace-account-name");
   await textButton("设置", "document.querySelector('.account-menu')");
   await textButton("模型", "document.querySelector('.preferences-nav')");
-  const settings="document.querySelector('[data-model-visibility]')";
   await click('[aria-label="默认模型"]');
   await until(()=>evaluate("document.querySelector('.model-picker-popover .model-list-count')?.textContent.includes('1505 个')"),'full picker catalog');
   const loadedCalls=catalogCalls;
