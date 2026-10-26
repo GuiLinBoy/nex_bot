@@ -184,6 +184,17 @@ try {
   await evaluate("document.querySelector('[data-model-key-status]').scrollIntoView({block:'center'})");
   if(!await evaluate("document.documentElement.scrollWidth<=innerWidth"))throw new Error('Saved API Key status overflows mobile layout');
   await screenshot('saved-api-key-mobile');cases.push('saved-key-status-survives-reload-and-mobile-layout');
+  // Protocol switch: a custom endpoint keeps the key; swapping a default endpoint to another vendor's host drops it.
+  await command('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
+  const setProtocol=value=>evaluate(`(()=>{const el=document.querySelector('select[name=provider]');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  const customEndpoint=await evaluate("document.querySelector('input[name=endpoint]').value");
+  await input('input[name=apiKey]','protocol-switch-key');
+  await setProtocol('anthropic');
+  if(!await evaluate(`document.querySelector('input[name=apiKey]').value==='protocol-switch-key'&&document.querySelector('input[name=apiKey]').type==='password'&&document.querySelector('input[name=endpoint]').value===${JSON.stringify(customEndpoint)}&&document.querySelector('select[name=provider]').value==='anthropic'`))throw new Error('Protocol switch on a custom endpoint dropped the key or changed the endpoint');
+  await input('input[name=endpoint]','https://api.anthropic.com');
+  await setProtocol('openai');
+  if(!await evaluate("document.querySelector('input[name=apiKey]').value===''&&document.querySelector('input[name=endpoint]').value==='https://api.openai.com/v1'"))throw new Error('Protocol switch to another vendor default kept the key');
+  cases.push('protocol-switch-keeps-key-on-custom-endpoint','protocol-switch-drops-key-when-default-endpoint-changes-vendor');
   if (exceptions.length) throw new Error("Renderer exception: " + exceptions.join("; "));
   const report = { passed: true, cases, catalogCalls, screenshots: output };
   writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2));

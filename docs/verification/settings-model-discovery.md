@@ -76,7 +76,9 @@ evidence are in ignored `release/local-key-reveal/`; production was not changed.
 
 Editing the endpoint used to clear the entered API Key on every keystroke.
 The form now preserves the explicit key draft while editing the endpoint and
-remasks it. Changing the protocol still discards the entered draft. The key
+remasks it. Changing the protocol keeps the entered draft on a custom endpoint, but
+discards it when a default OpenAI/Anthropic endpoint is swapped for the other vendor's,
+so a key is never sent to a different vendor's host. The key
 label shows `待保存` for a new draft and `已保存` for confirmed stored credentials.
 Reopening settings leaves the secret input blank, preserves the saved-key
 indicator and disables revealing an empty draft. The server does not return
