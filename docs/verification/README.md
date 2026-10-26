@@ -1,9 +1,19 @@
 # Verifying OpenMausBot
 
+- [Homepage navigation and complete download links (2026-10-25)](homepage-release-20261025.md)
+- [About, updates and preview controls: all-platform release (2026-10-25)](settings-updates-release-20261025.md)
+- [Client updates and Settings → About](client-updates.md)
+- [Chat, context and HTML: all-platform release (2026-10-25)](chat-release-20261025.md)
+- [Discoverable HTML rendering](html-render-tool.md)
+- [Chat send stability](chat-send-stability.md)
+- [Tool context follows total capacity](tool-context-budget.md)
 - [Image attachments and the context estimate](image-context-estimate.md)
+- [Windows client integrated title bar](windows-client-titlebar.md)
 - [Unified UI and role avatars: all-platform release](ui-roles-release.md)
+- [Graphic role gallery and motion](graphic-avatars.md)
 - [Gmail Connect from the connector catalog](gmail-catalog-connect.md)
 - [Flat layout in client windows](client-frame-flat.md)
+- [Feishu connector](feishu-connector.md)
 
 NexBot Core is a standalone Node backend. Desktop clients now include a local
 device executor; use the [client device executor recipe](client-device-executor.md)
