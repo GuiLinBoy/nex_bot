@@ -224,6 +224,7 @@ try {
   cases.push("real-file-upload-worker-read-download-card", "full-access-selection-persists-and-standard-restores");
   const downloads = path.join(root, "downloads"); mkdirSync(downloads);
   await command("Browser.setDownloadBehavior", { behavior:"allow", downloadPath:downloads });
+  await until(() => evaluate("document.querySelector('[aria-label=添加文件或指令]')?.disabled===false"), "composer ready before export");
   await click("[aria-label='添加文件或指令']");
   await textButton("导出对话", "document.querySelector('.composer-command-menu')");
   await until(() => readdirSync(downloads).some(name=>name.endsWith('.md')), "download conversation");

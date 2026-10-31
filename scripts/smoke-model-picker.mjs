@@ -120,7 +120,7 @@ try {
   await command('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
   await until(()=>evaluate("document.querySelector('input[name=model]')?.value==='demo-model-1504'"));
   cases.push('default-picker-shortlist-current-and-keyboard');
-  await click('.contact-item');
+  await click('.contact-item[data-agent]');
   await until(()=>evaluate("!!document.querySelector('.composer-add')"));
   if(await evaluate("!!document.querySelector('.composer-toolbar .permission-trigger, .composer-toolbar .model-picker-trigger')"))throw new Error('Duplicate composer controls remain');
   await screenshot('composer-clean-toolbar');
