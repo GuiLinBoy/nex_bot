@@ -1,5 +1,5 @@
 import { universalActions } from '../../shared/personal-capabilities';
-import { createContext, memo, useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { BOTTOM_FOLLOW_THRESHOLD, shouldResumeBottomFollow, useBottomFollowResize } from "../lib/bottom-follow";
 import Markdown, { type ExtraProps } from "react-markdown";
 import type { ComponentProps } from "react";
@@ -9,26 +9,31 @@ import { htmlPreviewParts } from "../../shared/html-preview";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { rehypeStaticHTML } from "./static-html";
-import { ArrowDown, ArrowUp, AtSign, Check, ChevronDown, CircleAlert, Clock, Copy, CornerUpLeft, FileText, Image as ImageIcon, Info, Loader2, Pin, Play, Plus, PanelLeft, Share2, Shield, Sparkles, Square, X, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, AtSign, Check, ChevronDown, CircleAlert, Clock, Copy, CornerUpLeft, FileText, Image as ImageIcon, Loader2, Pin, Play, Plus, PanelLeft, PanelRight, Share2, Shield, Sparkles, Square, X, Zap } from "lucide-react";
 import { api, desktop, listModels, statuses, str, taskPhrase, toolLabels, type ClientUpdateState, type PreviewItem, type RecordRow, type State, type ToolStep } from "./api";
 import { useAccount } from "./auth";
 import { lookOf } from "./characters";
 import { Confirm, Editor, ModelSettings, SettingsPage, type SettingsCategory } from "./panels";
 import { AvatarPicker } from "./components/AvatarPicker";
 import { AgentAvatar as Avatar } from "./components/AgentAvatar";
+import { TodoWorkspace } from "./todo/TodoWorkspace";
 import { ContactSidebar } from "./components/ContactSidebar";
 import type { ConversationMatch } from "./components/ConversationSearch";
 import { ToolActivityDisclosure } from "./vendor/rakazo/ToolActivityDisclosure";
-import { companionState, companionLabels, type CompanionState } from "./avatars/appearance";
+import { appearanceOf, colors, companionState, companionLabels, type CompanionState } from "./avatars/appearance";
 import { BrandMark } from "./components/BrandMark";
 import { ComposerControls } from "./components/ComposerControls";
+import { DocumentCard } from "./components/DocumentCard";
+import { replyLayout } from "./long-reply";
 import { MessageImages } from "./components/MessageImages";
 import { ImageLightbox } from "./components/ImageLightbox";
 import { isImageFileName, parseMessageMedia, type MessageImage } from "./message-media";
 import { ModelPicker } from "./components/ModelPicker";
 import { BotIdentity } from "./components/BotIdentity";
+import { RoutineDetail, routineSchedule, routineEnded } from "./components/RoutineDetail";
+import { RoutineOccurrenceDetail, occurrenceStatus, routineStatusLabel } from "./components/RoutineOccurrenceDetail";
 import { copyText as writeCopyText } from "../lib/copy-text";
-import { imageFilesFromClipboard, optimisticOutgoing, transcriptMessageKey, withPendingOptimistic } from "./transcript-session";
+import { imageFilesFromClipboard, optimisticOutgoing, transcriptMessageKey, withPendingOptimistic, withoutCommittedStreaming } from "./transcript-session";
 
 const terminal = ["succeeded", "failed", "cancelled", "rejected"];
 const formatTime = (value: RecordRow[string]) => value ? new Date(Number(value)).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
@@ -37,6 +42,7 @@ const formatShortTime = (value: RecordRow[string]) => {
   const date = new Date(Number(value)), now = new Date();
   return date.toDateString() === now.toDateString() ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 };
+const formatClock = (value: RecordRow[string]) => value ? new Date(Number(value)).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "";
 const formatDay = (value: RecordRow[string]) => {
   if (!value) return "";
   const date = new Date(Number(value)), now = new Date();
@@ -48,7 +54,7 @@ const formatDay = (value: RecordRow[string]) => {
 
 function AgentPolicyEditor({ bot, close, save }: { bot: RecordRow; close: () => void; save: (tools: string[]) => Promise<unknown> }) {
   const [tools, setTools] = useState<string[]>(JSON.parse(str(bot.policy_json) || "{}").tools ?? []);
-  const labels: Record<string, string> = { "html.render": "展示交互内容", "image.models": "查看生图模型", "image.generate": "按需生成图片", "memory.search": "检索自身与共享记忆", "memory.reflect": "综合记忆并引用来源", "memory.read": "读取自身与共享记忆", "memory.write": "维护自身私有记忆", "memory.delete": "撤回自身私有记忆", "memory.forget": "彻底遗忘相关原文与副本", "routine.list": "查看自己的计划", "routine.save": "安排或修改自己的计划", "routine.toggle": "暂停或恢复自己的计划", "routine.run": "立即运行自己的计划", "agent.directory": "读取 Agent 公开目录", "agent.delegate": "联系同伴", "agent.create": "按指示招募新同伴", "agent.update": "按指示更新同伴资料", "device.list": "查看已授权设备目录", "device.read": "读取已授权设备文件", "device.exec": "执行设备终端命令", "device.inventory": "识别设备与在线状态", "device.info": "读取设备系统信息", "device.computer": "使用获准的电脑窗口", "connector.list": "查看已授权连接器", "connector.tools": "查看连接器工具", "connector.call": "调用连接器工具", "attachment.read": "读取对话附件", "skill.list": "查看通用技能目录", "skill.read": "阅读通用技能说明" };
+  const labels: Record<string, string> = { "html.render": "展示交互内容", "image.models": "查看生图模型", "image.generate": "按需生成图片", "memory.search": "检索自身与共享记忆", "memory.reflect": "综合记忆并引用来源", "memory.read": "读取自身与共享记忆", "memory.write": "维护自身私有记忆", "memory.delete": "撤回自身私有记忆", "memory.forget": "彻底遗忘相关原文与副本", "tool.search": "查询工具", "todo.list": "查看待办", "todo.save": "保存待办", "todo.delete": "删除待办", "routine.list": "查看自己的计划", "routine.save": "安排或修改自己的计划", "routine.toggle": "暂停或恢复自己的计划", "routine.run": "立即运行自己的计划", "agent.directory": "读取 Agent 公开目录", "agent.delegate": "联系同伴", "agent.create": "按指示招募新同伴", "agent.update": "按指示更新同伴资料", "device.list": "查看已授权设备目录", "device.read": "读取已授权设备文件", "device.exec": "执行设备终端命令", "device.inventory": "识别设备与在线状态", "device.info": "读取设备系统信息", "device.computer": "使用获准的电脑窗口", "connector.list": "查看已授权连接器", "connector.tools": "查看连接器工具", "connector.call": "调用连接器工具", "attachment.read": "读取对话附件", "skill.list": "查看通用技能目录", "skill.read": "阅读通用技能说明" };
   return <><div className="modal-heading"><h2>{bot.name} 的工具权限</h2><button aria-label="关闭" onClick={close}><X size={18}/></button></div><form onSubmit={(event) => { event.preventDefault(); void save(tools); }}><div className="policy-grid">{Object.entries(labels).map(([action, label]) => <label className="check-field" key={action}><input type="checkbox" checked={universalActions.some(tool => tool === action) || tools.includes(action)} disabled={universalActions.some(tool => tool === action)} onChange={(event) => setTools((current) => event.target.checked ? [...current, action] : current.filter((tool) => tool !== action))}/>{label}</label>)}</div><div className="actions"><button className="primary">保存</button><button type="button" onClick={close}>取消</button></div></form></>;
 }
 
@@ -104,6 +110,9 @@ export function AgentDesktop() {
   const [pinned, setPinned] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("nexbot.pinnedAgents") || "[]") as string[]; } catch { return []; } });
   const [dark, setDark] = useState(() => localStorage.getItem("nexbot.dark") === "1");
   const [sidebarOpen, setSidebarOpen] = useState(desktop?.platform === "android" && window.innerWidth <= 720);
+  const [rail, setRail] = useState(() => localStorage.getItem("nexbot.rail") !== "0"), [wide, setWide] = useState(() => window.matchMedia("(min-width: 721px)").matches);
+  useEffect(() => { const query = window.matchMedia("(min-width: 721px)"), change = () => setWide(query.matches); query.addEventListener("change", change); return () => query.removeEventListener("change", change); }, []);
+  const toggleRail = () => setRail((open) => { localStorage.setItem("nexbot.rail", open ? "0" : "1"); return !open; });
   type Attachment = { id: string; name: string; size: number; mime?: string; previewUrl?: string };
   type PendingUpload = { key: string; file: File; error?: string; controller: AbortController };
   const [attachments, setAttachments] = useState<Attachment[]>([]), [pending, setPending] = useState<PendingUpload[]>([]);
@@ -188,6 +197,9 @@ export function AgentDesktop() {
   const [focusedMessage,setFocusedMessage]=useState("");
   const historyTarget=useRef<{botId:string;id:string} | undefined>(undefined),scrolledTarget=useRef("");
   const selected = useRef(botId), pageRef = useRef(page), scroll = useRef<HTMLDivElement>(null), transcriptInner = useRef<HTMLDivElement>(null), composerRef = useRef<HTMLTextAreaElement>(null), serial = useRef(0);
+  // Set once Core has accepted the send. Cleared only when a later reload publishes
+  // its snapshot, so a superseded reload cannot drop the in-progress row first.
+  const pendingSend = useRef<{ botId: string; acceptedAfter: number } | undefined>(undefined);
   const previousScrollTop = useRef(0), touchY = useRef(0), feedRetry = useRef(false), loadedBot = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (desktop?.platform !== "android") return;
@@ -233,7 +245,7 @@ export function AgentDesktop() {
     void uploadRef.current([new File([blob], image.name.trim() || "截图.png", { type: image.type })]);
   }), []);
   const loaded = useRef<{ botId: string; messages: RecordRow[]; sync: State["sync"] } | undefined>(undefined);
-  const offline = useCallback(() => { ++serial.current; loaded.current = undefined; setConnected(false); setMessages([]); setStreaming([]); setSendingBotId(undefined); setState(undefined); setDialog(null); setError("Core 连接中断，正在重新同步…"); }, []);
+  const offline = useCallback(() => { ++serial.current; loaded.current = undefined; pendingSend.current = undefined; setConnected(false); setMessages([]); setStreaming([]); setSendingBotId(undefined); setState(undefined); setDialog(null); setError("Core 连接中断，正在重新同步…"); }, []);
   const drafts = useRef(new Map<string, string>()), readPositions = useRef(new Map<string, number>()), retry = useRef<{ botId: string; text: string; id: string } | undefined>(undefined);
   selected.current = botId; pageRef.current = page;
 
@@ -244,6 +256,12 @@ export function AgentDesktop() {
 
   const reload = useCallback(async () => {
     const request = ++serial.current, current = selected.current;
+    const releaseSend = () => {
+      const pending = pendingSend.current;
+      if (!pending || request <= pending.acceptedAfter) return;
+      pendingSend.current = undefined;
+      setSendingBotId((id) => id === pending.botId ? undefined : id);
+    };
     type Feed = { messages: RecordRow[]; streaming: Array<{ taskId: string; text: string }>; sync: State["sync"]; hasMore: boolean };
     const target=historyTarget.current?.botId===current?historyTarget.current:undefined;
     const base = `agents/messages?bot=${encodeURIComponent(current)}${target?`&around=${encodeURIComponent(target.id)}`:""}`;
@@ -259,7 +277,7 @@ export function AgentDesktop() {
       if (updated) setMemoryNotice(str(updated.title));
     }
     memoryVersions.current = new Map(next.memories.map((m) => [str(m.id), `${m.version}:${m.updated_at}`]));
-    if (current && !next.bots.some((bot) => bot.id === current)) { setState(next); setBotId(str(next.bots[0]?.id)); setMessages([]); setStreaming([]); return; }
+    if (current && !next.bots.some((bot) => bot.id === current)) { setState(next); setBotId(str(next.bots[0]?.id)); setMessages([]); setStreaming([]); releaseSend(); return; }
     if (current) {
       // Commit task state with its feed below, so the typing indicator cannot
       // disappear a network round trip before the final reply arrives.
@@ -267,7 +285,12 @@ export function AgentDesktop() {
       const same = cached?.botId === current && cached.sync.privacyEpoch === next.sync.privacyEpoch && cached.sync.coreId === next.sync.coreId && cached.sync.bootId === next.sync.bootId;
       let history = same ? cached.messages : [];
       let feed: Feed;
-      try { feed = await (same || !guess?.messages.length ? early! : api<Feed>(base)); }
+      // The prefetch can be served before this state snapshot. After a send, read the
+      // transcript again so the reply cannot lag behind the task that produced it.
+      const pending = pendingSend.current;
+      const feedAfterAccept = !!pending && pending.botId === current && request > pending.acceptedAfter;
+      const freshFeed = () => api<Feed>(same && history.length ? `${base}&after=${history.at(-1)!.seq}` : base);
+      try { feed = await (feedAfterAccept ? freshFeed() : (same || !guess?.messages.length ? early! : api<Feed>(base))); }
       catch (failure) {
         if (request !== serial.current || selected.current !== current) return;
         if (!target || !(failure instanceof Error) || failure.message !== '该消息已不存在或已遗忘') throw failure;
@@ -299,7 +322,7 @@ export function AgentDesktop() {
         void api("agents/read", { botId: current, seq: through }).catch(() => { if (readPositions.current.get(current) === through) readPositions.current.delete(current); });
       }
     }
-    if (request === serial.current) { setState(next); setConnected(true); setError(""); setHistoryLoading(false); }
+    if (request === serial.current) { setState(next); setConnected(true); setError(""); setHistoryLoading(false); releaseSend(); }
   }, [offline]);
   useEffect(() => {
     // A remembered Agent is loaded by the selection effect below; reloading here too would only be superseded.
@@ -373,9 +396,12 @@ export function AgentDesktop() {
     void run(async () => {
       try {
         await api("agents/input", { botId: target, text: content, clientId, attachments: attachmentIds });
+        pendingSend.current = { botId: target, acceptedAfter: serial.current };
         setFiles(target, []);
         retry.current = undefined;
       } catch (error) {
+        pendingSend.current = undefined;
+        setSendingBotId((id) => id === target ? undefined : id);
         if (!drafts.current.has(target)) drafts.current.set(target, savedDraft);
         if (selected.current === target) {
           setDraft((current) => current || savedDraft);
@@ -383,15 +409,15 @@ export function AgentDesktop() {
         }
         throw error;
       }
-    }).finally(() => setSendingBotId(undefined));
+    });
   };
-  const bot = state?.bots.find((b) => b.id === botId), tasks = state?.tasks.filter((t) => t.bot_id === botId && !terminal.includes(str(t.status))) ?? [];
+  const bot = state?.bots.find((b) => b.id === botId), tasks = state?.tasks.filter((t) => t.bot_id === botId && t.origin !== "routine" && !terminal.includes(str(t.status))) ?? [];
   useEffect(() => {
     const previous = previousTask.current;
     previousTask.current = tasks[0] ? { botId, taskId: str(tasks[0].id) } : undefined;
     setSettledState("idle");
     if (!tasks.length && previous?.botId === botId) {
-      const settled = state?.tasks.find((task) => task.id === previous.taskId);
+      const settled = state?.tasks.find((task) => task.id === previous.taskId && task.origin !== "routine");
       if (settled?.status === "succeeded" || settled?.status === "failed") {
         setSettledState(settled.status === "succeeded" ? "done" : "failed");
         const timer = setTimeout(() => setSettledState("idle"), 2400);
@@ -400,7 +426,8 @@ export function AgentDesktop() {
     }
   }, [botId, tasks[0]?.id]);
   const avatarState = !connected ? "offline" : tasks.length ? companionState(tasks[0], state?.approvals.some((a) => a.bot_id === botId), connected) : sendingBotId === botId ? "thinking" : settledState;
-  const processing = connected && !streaming.length && (sendingBotId === botId || tasks.some((task) => ["queued", "running", "cancelling"].includes(str(task.status))));
+  const liveStreaming = withoutCommittedStreaming(messages, streaming);
+  const processing = connected && !liveStreaming.length && (sendingBotId === botId || tasks.some((task) => ["queued", "running", "cancelling"].includes(str(task.status))));
   const setFollowing = useCallback((next: boolean) => {
     stickToBottom.current = next;
     setShowScrollPill(!next && messagesRef.current.length > 3 && !historyTarget.current);
@@ -422,7 +449,16 @@ export function AgentDesktop() {
     return () => window.removeEventListener("keydown", onKey);
   }, [setFollowing]);
   useEffect(() => { setShowScrollPill(!stickToBottom.current && messages.length > 3 && !historyTarget.current); }, [messages]);
-  useEffect(() => { const field = composerRef.current; if (field) { field.style.height = "auto"; field.style.height = `${Math.min(160, field.scrollHeight)}px`; } }, [draft, botId, page]);
+  useEffect(() => {
+    const field = composerRef.current;
+    if (!field) return;
+    // The field wraps with its width, so it is re-fitted when the window or the side panels move it.
+    const fit = () => { field.style.height = "auto"; field.style.height = `${Math.min(160, field.scrollHeight)}px`; };
+    fit();
+    const settle = setTimeout(fit, 400);
+    window.addEventListener("resize", fit);
+    return () => { clearTimeout(settle); window.removeEventListener("resize", fit); };
+  }, [draft, botId, page, detail, rail]);
   const descendantTasks = new Set(tasks.map((task) => task.id));
   for (let depth = 0; depth < 3; depth++) for (const link of state?.delegations ?? []) if (descendantTasks.has(link.parent_task_id)) descendantTasks.add(link.child_task_id);
   const waitingPeers = state?.approvals.filter((approval) => approval.bot_id !== botId && descendantTasks.has(approval.task_id)) ?? [];
@@ -450,7 +486,8 @@ export function AgentDesktop() {
   const editAvatar = () => { if (bot && state) setDialog(<AvatarPicker bot={bot} firstId={str(state.bots[0]?.id)} onChange={async () => { setLookRevision((value) => value + 1); await reload(); }} close={closeDialog}/>); };
   const editBot = (existing?: RecordRow) => setDialog(<Editor title={existing ? "Agent 身份" : "添加 Agent"} onClose={closeDialog} fields={[{ name: "name", label: "名字", value: str(existing?.name), required: true }, { name: "instructions", label: "补充身份、职责与沟通方式（选填）", value: str(existing?.instructions), multiline: true, hint: "名字也是身份的一部分，留空也可以。修改后，其他 Agent 会自动获取最新资料。" }]} onSubmit={(data) => run(async () => { const result = await api<{ id: string }>(existing ? "bots/update" : "bots", { ...data, id: existing?.id, version: existing?.version }); if (!existing) { await reload(); select(result.id); } closeDialog(); })}/>);
   const editMemory = (existing?: RecordRow) => setDialog(<Editor title={existing ? "编辑记忆" : "添加记忆"} onClose={closeDialog} fields={[{ name: "title", label: "标题", value: str(existing?.title), required: true }, { name: "content", label: "记忆内容", value: str(existing?.content), multiline: true, required: true }, { name: "scope", label: "可见范围", value: str(existing?.scope) || "bot", choices: [{ value: "bot", label: `仅 ${bot?.name}` }, { value: "workspace", label: "与所有 Agent 共享" }] }]} onSubmit={(data) => run(async () => { await api("memory", { ...data, botId: existing?.bot_id ?? botId, documentId: existing?.id, expectedVersion: existing?.version ?? 0 }); closeDialog(); })}/>);
-  const editRoutine = (existing?: RecordRow) => setDialog(<RoutineEditor botId={botId} existing={existing} close={closeDialog} runNow={existing ? () => run(async () => { await api("routines/run", { id: existing.id, clientId: crypto.randomUUID() }); closeDialog(); }) : undefined} save={(data) => run(async () => { await api("routines", data); closeDialog(); })}/>);
+  const viewRoutine = (routine: RecordRow) => setDialog(<RoutineDetail routine={routine} latest={state?.occurrences.find((o) => o.routine_id === routine.id)} close={closeDialog} showResult={(id) => openOccurrence(id)} disable={async () => { await api("routines/toggle", { id: routine.id, version: routine.version, enabled: false }); await reload(); closeDialog(); }} remove={async () => { await api("routines/delete", { id: routine.id, version: routine.version }); await reload(); closeDialog(); }}/>);
+  const openOccurrence = (id: string) => setDialog(<RoutineOccurrenceDetail key={id} id={id} close={closeDialog} renderContent={(value, pending) => <RichText value={value} pending={pending}/>}/>);
   const loadOlder = async () => {
     const snapshot = loaded.current;
     if (!snapshot?.messages.length) return;
@@ -495,31 +532,32 @@ export function AgentDesktop() {
   const enabledTools: string[] = (() => { try { return JSON.parse(str(bot?.policy_json) || "{}").tools ?? []; } catch { return []; } })();
   const modelLabel = str(bot?.selected_model) || str(state.config?.default_model) || "未连接模型";
   const userDisplayName = accountStatus?.account?.displayName || "个人账号";
+  const panelOpen = page === "agent" && detail && !!bot, railClosed = !rail && wide;
+  const recentRuns = state.occurrences.filter((o) => o.bot_id === botId).slice(0, 10), routines = state.routines.filter((r) => r.bot_id === botId);
+  const look = appearanceOf(bot, str(state.bots[0]?.id)), accent = look.kind === "companion" ? colors[look.color].value : undefined;
+  const heroState = !connected ? companionLabels.offline : tasks.length ? taskPhrase(tasks[0]) : avatarState === "idle" ? "在线" : companionLabels[avatarState];
   void lookRevision;
 
+  if (page === "todo") return <TodoWorkspace key={`${state.sync.coreId}:${state.sync.privacyEpoch}`} state={state} dark={dark} collapsed={railClosed} sidebar={<ContactSidebar state={state} selectedId={botId} page={page} search={search} pinned={pinned} dark={dark} connected={connected} userName={userDisplayName} open={sidebarOpen} collapsed={railClosed} onToggle={toggleRail} onSearch={setSearch} onSearchResult={openSearchResult} onSelect={select} onPage={(target) => { if(target === "todo") {setPage("todo");setSidebarOpen(false);} else openSettings();}} onCreate={() => editBot()} onTheme={() => setDark((value) => !value)} onLogout={signOut} onClose={() => setSidebarOpen(false)}/>} onNavigation={()=>setSidebarOpen(true)} onOpenAgent={select} overlay={dialog ? <div className="modal-backdrop" onKeyDown={(e) => { if (e.key === "Escape") closeDialog(); }}><div className="modal" role="dialog" aria-modal="true">{dialog}</div></div> : null}/>;
+
   return <div className="workspace-stage" data-dark={dark ? "1" : "0"} data-shell={desktop?.mode === "client" ? "1" : "0"}>
-    <div className={`app rk-workspace ${page === "agent" && detail && bot ? "with-detail" : ""}`} data-motion={motion ? "on" : "off"} data-theme="studio" data-dark={dark ? "1" : "0"}>
-    <ContactSidebar state={state} selectedId={botId} page={page} search={search} pinned={pinned} dark={dark} connected={connected} userName={userDisplayName} open={sidebarOpen} onSearch={setSearch} onSearchResult={openSearchResult} onSelect={select} onPage={() => openSettings()} onCreate={() => editBot()} onTheme={() => setDark((value) => !value)} onLogout={signOut} onClose={() => setSidebarOpen(false)}/>
+    <div className={`app rk-workspace ${panelOpen ? "with-detail" : ""}`} data-left={railClosed ? "closed" : "open"} data-right={panelOpen ? "open" : "closed"} data-page={page} data-motion={motion ? "on" : "off"} data-theme="studio" data-dark={dark ? "1" : "0"} style={accent ? { "--bot-color": accent } as CSSProperties : undefined}>
+    <ContactSidebar state={state} selectedId={botId} page={page} search={search} pinned={pinned} dark={dark} connected={connected} userName={userDisplayName} open={sidebarOpen} collapsed={railClosed} onToggle={toggleRail} onSearch={setSearch} onSearchResult={openSearchResult} onSelect={select} onPage={(target) => { if(target === "todo") {setPage("todo");setSidebarOpen(false);} else openSettings();}} onCreate={() => editBot()} onTheme={() => setDark((value) => !value)} onLogout={signOut} onClose={() => setSidebarOpen(false)}/>
 
     <main>
       <header>
-        <button className="icon-button mobile-menu" aria-label="展开联系人列表" onClick={() => setSidebarOpen(true)}><PanelLeft size={19}/></button>
-        <div className={`contact-heading ${page === "agent" && bot ? "clickable" : ""}`} onClick={() => { if (page === "agent" && bot) setDetail((current) => !current); }} title={page === "agent" && bot ? "点击展开或收起 Agent 资料" : undefined}>
-          {page === "agent" && bot ? <>
-            <Avatar bot={bot} allBots={state.bots} size={40} state={avatarState} animate/>
-            <div>
-              <div className="contact-title-row">
-                <strong>{bot.name}</strong>
-                <span className="ds-model-pill"><Zap size={10}/>{modelLabel}</span>
-              </div>
+        <div className="header-side"><button className="icon-button mobile-menu" aria-label="展开联系人列表" onClick={() => setSidebarOpen(true)}><PanelLeft size={19}/></button></div>
+        {page === "agent" && bot
+          ? <button type="button" className="contact-heading clickable who glass" inert={panelOpen} title="打开 Agent 资料" onClick={() => setDetail(true)}>
+              <Avatar bot={bot} allBots={state.bots} size={30} state={avatarState} animate/>
+              <strong>{bot.name}</strong>
               <span className={tasks.length ? "active-phrase" : ""}>{tasks.length ? `${taskPhrase(tasks[0])}${tasks.length > 1 ? ` · ${tasks.length} 项工作正在进行` : ""}` : companionLabels[avatarState]}</span>
-            </div>
-          </> : <strong>{page === "settings" ? "设置" : "你的 Agent"}</strong>}
-        </div>
+            </button>
+          : <div className="contact-heading who"><strong>{page === "settings" ? "设置" : "你的 Agent"}</strong></div>}
         <div className="header-actions">
           {page === "agent" && bot && memoryNotice ? <span className="memory-pill" role="status"><Sparkles size={13}/>已更新记忆：{memoryNotice}</span> : null}
-          {page === "agent" && bot && messages.length > 0 ? <button type="button" className="bt-round" title="复制对话记录" onClick={() => exportTranscript()}>{exported ? <Check size={16}/> : <Share2 size={16}/>}</button> : null}
-          {page === "agent" && bot ? <button aria-label="助手详情" title="Agent 资料" className={`bt-round ${detail ? "selected" : ""}`} onClick={() => setDetail(!detail)}><Info size={17}/></button> : null}
+          {page === "agent" && bot && messages.length > 0 ? <button type="button" className="bt-round glass" title="复制对话记录" aria-label="复制对话记录" onClick={() => exportTranscript()}>{exported ? <Check size={16}/> : <Share2 size={16}/>}</button> : null}
+          {page === "agent" && bot ? <button aria-label="助手详情" aria-pressed={panelOpen} title="Agent 资料" className={`bt-round glass ${panelOpen ? "selected" : ""}`} onClick={() => setDetail(!detail)}><PanelRight size={17}/></button> : null}
         </div>
       </header>
 
@@ -542,31 +580,31 @@ export function AgentDesktop() {
             <div className="ds-welcome-badge" style={{ color: botLook.ink.solid, background: botLook.ink.soft }}>长期陪伴，随时开始</div>
             <h1>{bot?.name}</h1>
             <p>{str(bot?.instructions) || "我是你的专属智能同伴。你可以直接向我提问、安排定时任务，或输入 @ 让我与团队其他成员协作。"}</p>
-            <small>直接发消息，或为我安排一项例行任务。</small>
+            <small>直接发消息，或安排一项定时任务。</small>
             <div className="welcome-chips">
-              <button type="button" onClick={() => editRoutine()}><Clock size={13}/>安排例行任务</button>
               <button type="button" onClick={() => editMemory()}><Sparkles size={13}/>添加长期记忆</button>
               {peers.length ? <button type="button" onClick={() => { changeDraft(`@${peers[0].name} `); composerRef.current?.focus(); }}><AtSign size={13}/>让 {peers[0].name} 协作</button> : null}
             </div>
           </div> : messages.map((m, idx) => {
-            const prevDay = idx > 0 ? formatDay(messages[idx - 1].created_at) : "";
-            const curDay = formatDay(m.created_at);
+            const prev = messages[idx - 1], next = messages[idx + 1], curDay = formatDay(m.created_at);
+            const prevDay = prev ? formatDay(prev.created_at) : "";
+            const joined = sameGroup(prev, m) && prevDay === curDay, ends = !(next && sameGroup(m, next) && formatDay(next.created_at) === curDay);
             return <div key={transcriptMessageKey(m)} data-search-match={m.id===focusedMessage?"true":undefined} className={m.id===focusedMessage?"search-message-target":undefined}>
               {curDay && curDay !== prevDay ? <div className="day-divider"><span>{curDay}</span></div> : null}
-              <AgentMessage message={m} bot={bot} bots={state.bots} select={select} copiedId={copiedId} onCopy={copyText} onPreviewFile={openFilePreview} onPreviewStep={openStepPreview} onDeleteImage={deleteMessageImage} onQuote={(msg) => { const author = senderLabel(msg, bot, state.bots), parsed = parseMessageMedia(str(msg.content)); setQuote({ author, text: parsed.text || (parsed.images.length ? "图片" : "") }); composerRef.current?.focus(); }}/>
+              <AgentMessage message={m} bot={bot} bots={state.bots} select={select} copiedId={copiedId} joined={joined} groupEnd={ends} onCopy={copyText} onPreviewFile={openFilePreview} onPreviewStep={openStepPreview} onDeleteImage={deleteMessageImage} onDetach={() => setFollowing(false)} onQuote={(msg) => { const author = senderLabel(msg, bot, state.bots), parsed = parseMessageMedia(str(msg.content)); setQuote({ author, text: parsed.text || (parsed.images.length ? "图片" : "") }); composerRef.current?.focus(); }}/>
             </div>;
           })}
-          {streaming.map((s) => {
+          {liveStreaming.map((s) => {
             const link = state.delegations.find((d) => d.child_task_id === s.taskId), peer = state.bots.find((b) => b.id === link?.sender_bot_id);
-            return <article className={`message assistant ${link ? "a2a-reply" : ""}`} key={s.taskId}>
-              <Avatar bot={bot} allBots={state.bots} size={34} state={avatarState}/>
+            return <article className={`message assistant streaming ${link ? "a2a-reply" : ""}`} key={s.taskId}>
+              <Avatar bot={bot} allBots={state.bots} size={26} state={avatarState}/>
               <div className="message-body">
                 {link ? <><div className="message-author"><strong>{bot?.name}</strong></div><FoldedReply content={s.text} recipient={str(peer?.name) || "Agent"} pending/></> : <><div className="ds-bot-author" style={{ color: botLook.ink.solid }}>{bot?.name}</div><div className="bubble"><RichText value={s.text} pending/></div><span className="muted">正在回复…</span></>}
               </div>
             </article>;
           })}
           {processing ? <article className="message assistant processing-message">
-            <Avatar bot={bot} allBots={state.bots} size={34} state={avatarState}/>
+            <Avatar bot={bot} allBots={state.bots} size={26} state={avatarState}/>
             <div className="message-body">
               <div className="ds-bot-author" style={{ color: botLook.ink.solid }}>{bot?.name}</div>
               <div className="bubble processing-dots" role="status" aria-label={`${bot?.name ?? "Agent"} 正在处理消息`}><span aria-hidden="true"/><span aria-hidden="true"/><span aria-hidden="true"/></div>
@@ -576,15 +614,15 @@ export function AgentDesktop() {
           </div>
         </div>
 
-        <div className="composer-area">
+        <div className="composer-dock">
           {showScrollPill && !focusedMessage ? <button type="button" className="scroll-pill" aria-label="回到底部" onClick={() => { setFollowing(true); scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "smooth" }); }}><ArrowDown size={22} strokeWidth={1.5} aria-hidden="true"/></button> : null}
+        <div className="composer-area">
           {state.approvals.filter((a) => a.bot_id === botId).map((a) => <section className="approval" key={str(a.id)}><strong>{bot?.name} 需要你的批准</strong><small>{a.remember_label ?? ({ "agent.delegate": "联系其他 Agent", "agent.create": "创建新的 Agent", "agent.update": "修改 Agent 的名字和身份说明", "memory.write": "写入长期记忆", "memory.forget": "彻底遗忘原文与相关副本（相关工作会停止）", "device.read": "读取设备文件", "device.list": "查看设备目录", "device.exec": "执行终端命令", "device.computer": "操作电脑窗口", "connector.call": "调用连接器工具" } as Record<string, string>)[str(a.tool_name)] ?? a.tool_name}</small><details><summary>查看具体操作</summary><pre>{JSON.stringify({ ...JSON.parse(str(a.arguments_json)), ...(a.tool_name === "memory.forget" ? { 清理范围: JSON.parse(str(a.authorization_snapshot_json)).forgetCounts } : {}) }, null, 2)}</pre></details><div className="actions"><button className="primary" disabled={busy} onClick={() => void run(() => api("approvals", { id: a.id, hash: a.argument_hash, allow: true }))}>允许一次</button><button disabled={busy} title={`始终允许当前 Agent：${a.remember_label ?? a.tool_name}`} onClick={() => void run(() => api("approvals", { id: a.id, hash: a.argument_hash, allow: true, remember: true }))}>始终允许</button><button disabled={busy} onClick={() => void run(() => api("approvals", { id: a.id, hash: a.argument_hash, allow: false }))}>拒绝</button></div></section>)}
           {waitingPeers.map((approval) => <div className="task-status" key={str(approval.id)}><span>{state.bots.find((peer) => peer.id === approval.bot_id)?.name ?? "同伴"} 等待你的批准</span><button onClick={() => select(str(approval.bot_id))}>前往处理</button></div>)}
-          {(tasks.length > 0 || sendingBotId === botId) && <div className="task-status"><span className="task-status-dot"/><span>{tasks.length === 0 ? "正在发送…" : tasks.some((task) => task.status === "cancelling") ? "正在停止…" : (tasks[0].status === "needs_reconciliation" ? "设备未返回确认，等待核对结果" : `Agent 正在工作 · ${taskPhrase(tasks[0])}`)}</span></div>}
           {quote ? <div className="quote-bar"><div><strong>引用 {quote.author}</strong><span>{quote.text}</span></div><button type="button" aria-label="取消引用" onClick={() => setQuote(undefined)}><X size={14}/></button></div> : null}
           {matchingPeers.length > 0 ? <div className="at-menu" role="listbox" aria-label="提及同伴 Agent">{matchingPeers.map((peer, index) => <button type="button" key={str(peer.id)} className={index === atIndex ? "selected" : ""} onMouseDown={(e) => { e.preventDefault(); applyMention(str(peer.name)); }}><Avatar bot={peer} allBots={state.bots} size={28}/><div><strong>@{peer.name}</strong><span>{str(peer.instructions) || "同伴 Agent"}</span></div></button>)}</div> : null}
           <input ref={fileInput} type="file" hidden multiple aria-label="上传附件" onChange={(event) => void upload(event.target.files)}/>
-          <form className="composer conversation-input" onSubmit={send}>
+          <form className="composer conversation-input glass" onSubmit={send}>
             {(attachments.length > 0 || pending.length > 0) && <div className="attachment-drafts" role="list" aria-label="待发送附件">
               {attachments.map((file) => file.previewUrl
                 ? <div className="attachment-image-draft" key={file.id} role="listitem">
@@ -616,7 +654,7 @@ export function AgentDesktop() {
                     </div>)}
             </div>}
             <textarea ref={composerRef} aria-label="发送给 Agent 的消息" placeholder={`给 ${bot?.name ?? "Agent"} 发消息…`} value={draft} onChange={(e) => changeDraft(e.target.value)} onCompositionEnd={() => { imeEndedAt.current = Date.now(); }} onPaste={pasteImages} onKeyDown={(e) => { if (e.nativeEvent.isComposing || Date.now() - imeEndedAt.current < 150) return; if (e.key === "Enter" && e.shiftKey) return; if (matchingPeers.length > 0) { if (e.key === "ArrowDown") { e.preventDefault(); setAtIndex((i) => (i + 1) % matchingPeers.length); return; } if (e.key === "ArrowUp") { e.preventDefault(); setAtIndex((i) => (i - 1 + matchingPeers.length) % matchingPeers.length); return; } if (e.key === "Tab") { e.preventDefault(); applyMention(str(matchingPeers[atIndex]?.name ?? matchingPeers[0].name)); return; } if (e.key === "Escape") { e.preventDefault(); setAtDismissed(true); return; } } if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && Date.now() - imeEndedAt.current >= 150) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} rows={Math.min(5, Math.max(1, draft.split("\n").length))}/>
-            <ComposerControls approvalRules={state.approvalRules?.filter((rule) => rule.bot_id === botId)} onRevokeRule={(id) => void run(() => api("approvals/revoke", { id, botId }))} key={JSON.stringify([botId,state.config?.provider_id,state.config?.endpoint])} visibleModels={state.modelVisibility?.models} mode={str(bot?.approval_setting) || "standard"} disabled={busy || !connected || !bot} uploading={uploading} canExport={messages.length > 0} onFile={() => fileInput.current?.click()} model={str(bot?.selected_model)} defaultModel={str(state.config?.default_model)} loadModels={() => listModels({ provider: str(state.config?.provider_id), endpoint: str(state.config?.endpoint), apiKey: "" })} onModel={(model) => run(() => api("bots/model", { id: botId, model, provider: state.config?.provider_id, endpoint: state.config?.endpoint, version: Number(bot?.model_selection_version ?? 0) }))} onExport={() => void run(downloadTranscript)} onMode={(mode) => void run(() => api("bots/approval-mode", { id: botId, mode, version: Number(bot?.approval_setting_version ?? 0) }))}>
+            <ComposerControls approvalRules={state.approvalRules?.filter((rule) => rule.bot_id === botId)} onRevokeRule={(id) => void run(() => api("approvals/revoke", { id, botId }))} key={JSON.stringify([botId,state.config?.provider_id,state.config?.endpoint])} visibleModels={state.modelVisibility?.models} mode={str(bot?.approval_setting) || "standard"} disabled={busy || !connected || !bot} uploading={uploading} canExport={messages.length > 0} onFile={() => fileInput.current?.click()} model={str(bot?.selected_model)} defaultModel={str(state.config?.default_model)} loadModels={() => listModels({ provider: str(state.config?.provider_id), endpoint: str(state.config?.endpoint), apiKey: "" })} onModel={(model) => run(() => api("bots/model", { id: botId, model, provider: state.config?.provider_id, endpoint: state.config?.endpoint, version: Number(bot?.model_selection_version ?? 0) }))} onExport={() => void run(downloadTranscript)} onNewTopic={() => void run(() => api("agents/topic", { botId }))} onMode={(mode) => void run(() => api("bots/approval-mode", { id: botId, mode, version: Number(bot?.approval_setting_version ?? 0) }))}>
               {/* While the Agent works and nothing is typed, the send key stops it; typing turns it back into send. */}
               {tasks.length > 0 && !draft.trim() && !attachments.length && !pending.length
                 ? <button type="button" className="send stop" aria-label="停止任务" title="停止任务" disabled={busy || !connected || tasks.every((task) => task.status === "cancelling")} onClick={() => void run(async () => { for (const task of tasks) await api("cancel", { taskId: task.id }); })}><Square size={14} fill="currentColor"/></button>
@@ -624,22 +662,18 @@ export function AgentDesktop() {
             </ComposerControls>
           </form>
         </div>
+        </div>
       </> : <SettingsPage state={state} run={run} category={settingsCategory} onCategory={setSettingsCategory} refresh={reload} setDialog={setDialog} closeDialog={closeDialog}/> }
     </main>
 
-    {page === "agent" && detail && bot ? <aside className="inspector ds-drawer"><div className="inspector-heading"><span>助手详情</span><button aria-label="收起助手详情" className="icon-button" onClick={() => setDetail(false)}><X size={17}/></button></div>
+    {page === "agent" && bot ? <aside className="inspector ds-drawer glass" aria-label="Agent 资料" inert={!panelOpen}><div className="inspector-heading"><button aria-label="收起助手详情" className="icon-button" onClick={() => setDetail(false)}><X size={17}/></button></div>
       <div className="profile-top">
         <div className="ds-drawer-top-actions">
           <button type="button" className={`bt-round ${pinned.includes(str(bot.id)) ? "selected" : ""}`} title={pinned.includes(str(bot.id)) ? "取消置顶" : "置顶联系人"} onClick={() => togglePin(str(bot.id))}><Pin size={15}/></button>
-
         </div>
-        <button type="button" className="profile-avatar-button" title="更换头像" aria-label={`更换 ${bot.name} 的头像`} onClick={editAvatar}><Avatar bot={bot} allBots={state.bots} size={64} state={avatarState} animate/></button>
+        <button type="button" className="profile-avatar-button" title="更换头像" aria-label={`更换 ${bot.name} 的头像`} onClick={editAvatar}><span className="hero-halo"><Avatar bot={bot} allBots={state.bots} size={96} state={avatarState} animate/></span></button>
         <strong>{bot.name}</strong>
-        <div className="ds-drawer-badges">
-          <span className="ds-role-badge" style={{ color: botLook.ink.solid, background: botLook.ink.soft }}>个人 Agent</span>
-        </div>
-
-
+        <span className="hero-state" data-state={avatarState}><i/>{heroState}</span>
       </div>
 
       <div className="inspector-tabs">
@@ -652,18 +686,24 @@ export function AgentDesktop() {
         {tab === "profile" ? <>
 
           {tasks.length > 0 && <h2>正在处理</h2>}
-          {tasks.map((t) => <section className="task ds-field-card" key={str(t.id)}><span className="tag">{taskPhrase(t)}</span><p>{t.objective || "Agent 工作"}</p><div className="actions">{t.status === "paused" ? <button onClick={() => void run(() => api("resume", { taskId: t.id }))}><Play size={12}/>继续</button> : null}<button onClick={() => void run(() => api("cancel", { taskId: t.id }))}><Square size={12}/>停止</button></div></section>)}
+          {tasks.map((t) => <section className="entry" key={str(t.id)}><span className="ic live"><Loader2 size={14}/></span><div><b>{t.objective || "Agent 工作"}</b><span>{taskPhrase(t)}</span>{t.created_at ? <time>{formatClock(t.created_at)}</time> : null}<div className="actions">{t.status === "paused" ? <button onClick={() => void run(() => api("resume", { taskId: t.id }))}><Play size={12}/>继续</button> : null}<button onClick={() => void run(() => api("cancel", { taskId: t.id }))}><Square size={12}/>停止</button></div></div></section>)}
 
-          {state.occurrences.some((o) => o.bot_id === botId) && <h2>最近执行</h2>}
-          {state.occurrences.filter((o) => o.bot_id === botId).slice(0, 10).map((o) => <section className="task ds-field-card" key={str(o.id)}><strong>{o.name}</strong><small>{statuses[str(o.status)]} · {formatTime(o.scheduled_at)}</small></section>)}
+          {recentRuns.length > 0 ? <details className="routine-disclosure routine-history"><summary>最近动态<span>{recentRuns.length}</span></summary>
+          {recentRuns.map((o, index) => { const day = formatDay(o.scheduled_at), status = occurrenceStatus(o), Icon = status === "succeeded" ? Check : status === "running" ? Loader2 : status === "pending" ? Clock : CircleAlert; return <div key={str(o.id)}>
+            {day && (!index || formatDay(recentRuns[index - 1].scheduled_at) !== day) ? <h3 className="day-label">{day}</h3> : null}
+            <button type="button" className="entry routine-occurrence" aria-label={`查看执行详情：${o.name}`} onClick={() => openOccurrence(str(o.id))}><span className={`ic ${status === "succeeded" ? "" : status === "running" ? "live" : status === "pending" ? "mem" : "warn"}`}><Icon size={14}/></span><span className="routine-occurrence-copy"><b>{o.name}</b><span>{routineStatusLabel(status)}</span>{o.scheduled_at ? <time>{formatClock(o.scheduled_at)}</time> : null}</span></button>
+          </div>; })}</details> : null}
 
-          <h2>例行任务<button aria-label="添加例行任务" onClick={() => editRoutine()}><Plus size={16}/></button></h2>
-          {state.routines.some((r) => r.bot_id === botId) ? <div className="routine-list" aria-label="例行任务列表">
-            {state.routines.filter((r) => r.bot_id === botId).map((r) => <div className="routine-row" key={str(r.id)}>
-              <button type="button" className="routine-summary" onClick={() => editRoutine(r)} title={`${r.name} · ${routineLabel(r)} · ${r.prompt}`}><strong>{r.name}</strong><span>{routineLabel(r)} · {r.prompt}</span></button>
-              <button type="button" role="switch" aria-checked={!!r.enabled} aria-label={`${r.name}`} disabled={busy} className={`routine-toggle ${r.enabled ? "on" : ""}`} onClick={() => void run(() => api("routines/toggle", { id: r.id, version: r.version, enabled: !r.enabled }))}><span/></button>
-            </div>)}
-          </div> : null}
+          <h2>定时任务</h2>
+          {routines.length ? <div className="routine-list" aria-label="定时任务列表">
+            {routines.map((r) => { const latest = state.occurrences.find((o) => o.routine_id === r.id), ended = routineEnded(r); return <article className="routine-row" key={str(r.id)}>
+              <div className="routine-row-heading"><button type="button" className="routine-summary" onClick={() => viewRoutine(r)} title={`查看 ${r.name}`}><strong>{r.name}</strong><span>{routineSchedule(r)}</span></button>
+                <span className="routine-ended">{ended ? "已结束" : r.enabled ? "已安排" : "已关闭"}</span>
+              </div>
+              {r.enabled && r.next_due_at ? <p className="routine-next">下次 {formatTime(r.next_due_at)}</p> : null}
+              <div className="routine-row-actions"><button type="button" onClick={() => viewRoutine(r)}>查看任务</button>{latest ? <button type="button" onClick={() => openOccurrence(str(latest.id))}>查看最近结果</button> : null}</div>
+            </article>; })}
+          </div> : <div className="routine-empty"><Clock size={24}/><strong>暂无定时任务</strong></div>}
 
         </> : null}
         {tab === "settings" ? <>
@@ -730,26 +770,29 @@ function senderLabel(m: RecordRow, bot: RecordRow | undefined, bots: RecordRow[]
   if (m.role === "peer") return str(bots.find((b) => b.id === (m.a2a_peer_id ?? m.sender_bot_id))?.name) || "同伴 Agent";
   return str(bot?.name) || "Agent";
 }
-function AgentMessage({ message: m, bot, bots, select, copiedId, onCopy, onQuote, onPreviewFile, onPreviewStep, onDeleteImage }: { message: RecordRow & { tool_steps?: ToolStep[] }; bot?: RecordRow; bots: RecordRow[]; select: (id: string) => void; copiedId: string; onCopy: (id: string, text: string) => void; onQuote: (msg: RecordRow) => void; onPreviewFile: (path: string) => void; onPreviewStep: (step: ToolStep) => void; onDeleteImage: (messageId: string, image: MessageImage) => Promise<void> }) {
+function AgentMessage({ message: m, bot, bots, select, copiedId, joined = false, groupEnd = true, onCopy, onQuote, onPreviewFile, onPreviewStep, onDeleteImage, onDetach }: { message: RecordRow & { tool_steps?: ToolStep[] }; bot?: RecordRow; bots: RecordRow[]; select: (id: string) => void; copiedId: string; joined?: boolean; groupEnd?: boolean; onCopy: (id: string, text: string) => void; onQuote: (msg: RecordRow) => void; onPreviewFile: (path: string) => void; onPreviewStep: (step: ToolStep) => void; onDeleteImage: (messageId: string, image: MessageImage) => Promise<void>; onDetach: () => void }) {
   const direction = str(m.a2a_direction), peer = bots.find((b) => b.id === (m.a2a_peer_id ?? m.sender_bot_id));
   if (direction === "sent" || direction === "returned") return <A2AMarker direction={direction} peer={peer} bots={bots} timestamp={m.created_at} select={select}/>;
   if (direction === "received") return <A2AMarker direction={direction} peer={peer} bots={bots} timestamp={m.created_at} select={select}/>;
-  if (direction === "replied" && m.role === "assistant") return <article className="message assistant a2a-reply"><Avatar bot={bot} allBots={bots} size={34}/><div className="message-body"><div className="message-author"><strong>{bot?.name ?? "Agent"}</strong></div><FoldedReply content={str(m.content)} recipient={peer?.name ? str(peer.name) : "Agent"}/><time>{formatTime(m.created_at)}</time></div></article>;
+  if (direction === "replied" && m.role === "assistant") return <article className="message assistant a2a-reply"><Avatar bot={bot} allBots={bots} size={26}/><div className="message-body"><div className="message-author"><strong>{bot?.name ?? "Agent"}</strong></div><FoldedReply content={str(m.content)} recipient={peer?.name ? str(peer.name) : "Agent"}/><time>{formatTime(m.created_at)}</time></div></article>;
   const canAct = m.role === "user" || m.role === "assistant" || m.role === "peer";
   const steps = Array.isArray(m.tool_steps) ? m.tool_steps : [];
   const { text, images } = parseMessageMedia(str(m.content));
-  return <article className={`message ${m.role} ${m.kind}`} data-message-id={str(m.id)}>
+  const assistant = m.role === "assistant", document = assistant && !!text && replyLayout(text).document;
+  return <article className={`message ${m.role} ${m.kind} ${joined ? "joined" : ""} ${groupEnd ? "group-end" : ""} ${document ? "has-doc" : ""}`} data-message-id={str(m.id)}>
+    {assistant ? groupEnd ? <Avatar bot={bot} allBots={bots} size={26}/> : <span className="message-gutter" aria-hidden="true"/> : null}
     <div className="message-body">
       {m.role === "peer" ? <div className="message-author"><Avatar bot={peer} allBots={bots} size={22}/>{peer?.name ?? "Agent"} · {m.kind === "request" ? "发来任务" : "返回结果"}</div> : null}
-      {steps.length > 0 ? <ToolActivityDisclosure live={false} stepCount={steps.length}><div className="step-list">{steps.map((step) => <button type="button" key={step.id} className="step-row" onClick={() => onPreviewStep(step)} title="点击在右侧面板查看详情"><span className={`step-dot ${step.status}`}/><strong>{toolLabels[step.tool_name] ?? step.tool_name}</strong>{step.summary ? <code>{step.summary}</code> : null}<small>{statuses[step.status] ?? step.status}</small></button>)}</div></ToolActivityDisclosure> : null}
+      {steps.length > 0 ? <ToolActivityDisclosure live={false} stepCount={steps.length} steps={steps}><div className="step-list">{steps.map((step) => <button type="button" key={step.id} className="step-row" onClick={() => onPreviewStep(step)} title="点击在右侧面板查看详情"><span className={`step-dot ${step.status}`}/><strong>{toolLabels[step.tool_name] ?? step.tool_name}</strong>{step.summary ? <code>{step.summary}</code> : null}<small>{statuses[step.status] ?? step.status}</small></button>)}</div></ToolActivityDisclosure> : null}
       <MessageImages images={images} onDelete={(image) => onDeleteImage(str(m.id), image)}/>
-      {text ? <div className="bubble"><RichText value={text} onPreviewFile={onPreviewFile}/></div> : null}
-      <div className="message-meta"><time title={formatTime(m.created_at)}>{formatShortTime(m.created_at)}</time>{canAct ? <span className="message-tools"><button type="button" className="tool-link" onClick={() => onQuote(m)} title="引用回复"><CornerUpLeft size={11}/>引用</button><button type="button" className="tool-link" onClick={() => onCopy(str(m.id), str(m.content))} title="复制内容">{copiedId === str(m.id) ? <><Check size={11}/>已复制</> : <><Copy size={11}/>复制</>}</button></span> : null}</div>
+      {text ? document ? <DocumentCard onExpand={onDetach}><RichText value={text} onPreviewFile={onPreviewFile}/></DocumentCard> : <div className="bubble"><RichText value={text} onPreviewFile={onPreviewFile}/></div> : null}
+      <div className="message-meta">{groupEnd || !assistant ? <time title={formatTime(m.created_at)}>{formatShortTime(m.created_at)}</time> : null}{canAct ? <span className="message-tools"><button type="button" className="tool-link" onClick={() => onQuote(m)} title="引用回复"><CornerUpLeft size={11}/>引用</button><button type="button" className="tool-link" onClick={() => onCopy(str(m.id), str(m.content))} title="复制内容">{copiedId === str(m.id) ? <><Check size={11}/>已复制</> : <><Copy size={11}/>复制</>}</button></span> : null}</div>
     </div>
   </article>;
 }
-function routineLabel(row: RecordRow) { return row.schedule_kind === "daily" ? `每天 ${row.local_time} · ${row.time_zone}` : row.schedule_kind === "interval" ? `每 ${Number(row.interval_ms) / 60_000} 分钟` : "一次性任务"; }
-function RoutineEditor({ botId, existing, close, save, runNow }: { botId: string; existing?: RecordRow; close: () => void; runNow?: () => Promise<void>; save: (data: Record<string, unknown>) => Promise<void> }) {
-  const [kind, setKind] = useState(str(existing?.schedule_kind) || "daily"), [pending, setPending] = useState(false);
-  return <><div className="modal-heading"><h2>{existing ? "编辑例行任务" : "添加例行任务"}</h2><button aria-label="关闭" onClick={close}><X size={18}/></button></div><form onSubmit={(e) => { e.preventDefault(); const data = Object.fromEntries(new FormData(e.currentTarget)); setPending(true); void save({ ...data, botId, id: existing?.id, version: existing?.version, runAt: data.runAt ? new Date(String(data.runAt)).getTime() : undefined }).finally(() => setPending(false)); }}><label className="field">名称<input autoFocus name="name" required defaultValue={str(existing?.name)} placeholder="例如：每日工作计划"/></label><label className="field">让 Agent 做什么<textarea name="prompt" required rows={4} defaultValue={str(existing?.prompt)} placeholder="描述目标、需要参考的资料和汇报方式"/></label><label className="field">执行计划<select name="scheduleKind" value={kind} onChange={(e) => setKind(e.target.value)}><option value="daily">每天</option><option value="interval">固定间隔</option><option value="once">指定时间执行一次</option></select></label>{kind === "daily" ? <label className="field">每天的时间<input name="localTime" type="time" required defaultValue={str(existing?.local_time) || "09:00"}/></label> : kind === "interval" ? <label className="field">间隔（分钟）<input name="intervalMinutes" type="number" min="1" max="525600" required defaultValue={existing?.interval_ms ? Number(existing.interval_ms) / 60_000 : 60}/></label> : <label className="field">执行时间（本机时间）<input name="runAt" type="datetime-local" required/></label>}<label className="field">时区<input name="timeZone" required defaultValue={str(existing?.time_zone) || Intl.DateTimeFormat().resolvedOptions().timeZone}/></label><p className="muted">按计划唤醒 Agent 会调用你配置的模型。需要批准的工具操作仍会等待你处理。</p><div className="actions"><button className="primary" disabled={pending}>保存</button><button type="button" onClick={close}>取消</button>{runNow ? <button type="button" disabled={pending} onClick={() => { setPending(true); void runNow().finally(() => setPending(false)); }}><Play size={12}/>现在执行</button> : null}</div></form></>;
+/** Consecutive replies from the same assistant within five minutes read as one group. */
+function sameGroup(a: RecordRow | undefined, b: RecordRow) {
+  const plain = (m: RecordRow) => m.role === "assistant" && !str(m.a2a_direction);
+  const gap = Number(b.created_at) - Number(a?.created_at);
+  return !!a && plain(a) && plain(b) && str(a.sender_bot_id) === str(b.sender_bot_id) && gap >= 0 && gap <= 5 * 60_000;
 }

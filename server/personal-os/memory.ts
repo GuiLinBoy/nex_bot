@@ -3,13 +3,21 @@ import { MemoryLedger } from "./memory-ledger.ts";
 import { policyTools } from "./policy.ts";
 import { MemoryPrivacy, type ForgetPlan } from "./memory-privacy.ts";
 import { AssistantMemory } from './assistant-memory.ts';
+import { dropVectors, lexicalHits, sourceRow } from './retrieval-index.ts';
+import { CoreMemory } from './core-memory.ts';
+import type { Retrieval, RetrievalResult } from './retrieval.ts';
 
 export class MemoryModule {
   readonly personal: AssistantMemory;
+  /** The always-loaded core memory (an assistant's and the workspace's). */
+  readonly core: CoreMemory;
+  /** Hybrid retrieval over memories, episode archives and documents (and its embedding / rerank settings). */
+  get retrieval(): Retrieval { return this.personal.retrieval; }
   readonly ledger: MemoryLedger;
   readonly privacy: MemoryPrivacy;
   constructor(readonly store: CoreStore, changed: () => void = () => {}, readonly fence: (plan: ForgetPlan) => void = () => {}) {
     this.personal=new AssistantMemory(store,changed);
+    this.core=new CoreMemory(store);
     this.privacy = new MemoryPrivacy(store);
     // Replay before capture/backfill or opening history to the renderer.
     const replayed: ForgetPlan[] = [];
@@ -26,19 +34,25 @@ export class MemoryModule {
     if (!row) throw new Error("记忆不存在或不属于该 Agent / 共享工作区");
     return row;
   }
-  search(botId: string, query: string) {
-    const needle = "%" + text(query, 200).replace(/[\\%_]/g, "\\$&") + "%";
-    return this.store.all("SELECT d.id,d.title,d.scope,d.bot_id,d.version,c.content FROM memory_documents d JOIN memory_content c ON c.document_id=d.id WHERE d.workspace_id=? AND d.owner_user_id=? AND d.status='active' AND (d.scope='workspace' OR d.bot_id=?) AND (d.title LIKE ? ESCAPE '\\' OR c.content LIKE ? ESCAPE '\\') ORDER BY d.updated_at DESC LIMIT 10", this.store.workspace, this.store.owner, botId, needle, needle);
+  /** Documents matching a query, best first: those of a hybrid retrieval the caller already made, else BM25. */
+  search(botId: string, query: string, found?: RetrievalResult): Row[] {
+    const needle = text(query, 200);
+    const rows = found ? found.candidates.filter((item) => item.kind === 'document').map((item) => item.row) : lexicalHits(this.store, botId, needle, ['document']).map((hit) => hit.row);
+    return rows.slice(0, 10).map((row) => ({ id: row.id, title: row.title, scope: row.scope, bot_id: row.bot_id, version: row.version, content: row.content }));
   }
   prompt(botId: string) {
     if(this.personal.settings(botId).version && !this.personal.enabled(botId)) return '长期记忆已关闭；连续对话和原文历史检索仍可使用。';
     const policy = this.store.get("SELECT * FROM bot_policies WHERE bot_id=?", botId);
     if (!policy || !policyTools(policy).includes("memory.search")) return "长期记忆检索已禁用";
-    // Order the top active memory ledger oldest-first (append-only) so adding
-    // new memories extends the tail without invalidating LLM prefix KV-caches.
-    // rowid breaks created_at ties by insertion order; the random id is not an order.
-    const rows = this.store.all("SELECT * FROM (SELECT d.id,d.title,d.scope,d.bot_id,d.version,d.created_at,c.content,d.rowid FROM memory_documents d JOIN memory_content c ON c.document_id=d.id WHERE d.workspace_id=? AND d.owner_user_id=? AND d.status='active' AND (d.scope='workspace' OR d.bot_id=?) ORDER BY d.updated_at DESC LIMIT 15) ORDER BY CASE WHEN scope='workspace' THEN 0 ELSE 1 END,created_at ASC,rowid ASC", this.store.workspace, this.store.owner, botId);
-    return rows.map((m) => `[${m.scope === "workspace" ? "共享" : "私有"}记忆 id=${m.id} v=${m.version}] ${m.title}\n${String(m.content).slice(0, 1200)}`).join("\n\n").slice(0, 12_000);
+    // Only the small core memory is always loaded; its text changes only when a line does, so the prompt prefix
+    // stays cacheable. Documents, facts and archives are recalled per task or searched on demand.
+    return this.core.render(botId);
+  }
+  /** Whether a topic reference names a memory, document or archive this assistant can open. */
+  refExists(botId: string, ref: string): boolean {
+    const [kind, ident] = ref.split(':');
+    if (kind === 'episode') return !!sourceRow(this.store, 'episode', botId, ident);
+    return !!sourceRow(this.store, 'memory', botId, ident) || !!sourceRow(this.store, 'document', botId, ident);
   }
   write(botId: string, data: Record<string, unknown>, callId?: string) {
     const scope = data.scope === "workspace" ? "workspace" : "bot";
@@ -60,6 +74,7 @@ export class MemoryModule {
       this.store.run("INSERT INTO memory_content VALUES(?,?) ON CONFLICT(document_id) DO UPDATE SET content=excluded.content", documentId, content);
       this.store.run("DELETE FROM memory_search WHERE document_id=?", documentId);
       this.store.run("INSERT INTO memory_search(document_id,title,content) VALUES(?,?,?)", documentId, title, content);
+      dropVectors(this.store, "document", documentId);
       const result = { documentId, version: expectedVersion + 1, saved: true };
       this.store.insert("memory_document_versions", { document_id: documentId, version: result.version, title, content, content_hash: contentHash });
       if (old) this.ledger.retractDocument(documentId);
@@ -76,6 +91,9 @@ export class MemoryModule {
     this.store.transaction(() => {
       if (this.store.run("UPDATE memory_documents SET status='deleted',version=version+1,updated_at=? WHERE id=? AND version=? AND status='active'", now(), documentId, expectedVersion).changes !== 1) throw new Error("记忆版本已变化");
       this.store.run("DELETE FROM memory_search WHERE document_id=?", documentId);
+      dropVectors(this.store, "document", documentId);
+      this.store.run("DELETE FROM assistant_topic_members WHERE kind='document' AND ref_id=?", documentId);
+      this.store.run("DELETE FROM assistant_topic_member_scan WHERE kind='document' AND ref_id=?", documentId);
       this.ledger.retractDocument(documentId);
       this.store.audit("memory.delete", "memory", documentId, { expectedVersion });
     });
@@ -108,6 +126,7 @@ export class MemoryModule {
   }
   expand(botId: string, ref: string) {
     if(ref.startsWith('message:')) return {ref,sourceClass:'original',content:this.personal.source(botId,ref.slice(8)).content};
+    if(ref.startsWith('episode:')) return {ref,sourceClass:'synthesized',content:this.personal.source(botId,ref).content};
     const source = this.store.get("SELECT s.* FROM memory_source_registry s JOIN memory_bank_bindings b ON b.id=s.bank_id WHERE s.id=? AND s.status='active' AND (b.bot_id=? OR b.scope='workspace')", ref, botId);
     if (!source) throw new Error("来源已撤回或不可见");
     const payload = this.ledger.source(source); if (!payload) throw new Error("来源已变化");
@@ -123,10 +142,10 @@ export class MemoryModule {
     this.store.run("INSERT OR IGNORE INTO memory_source_edges VALUES(?,?)", copy.id, ref);
     return result;
   }
-  async recall(botId: string, query: string, taskId?: string) {
+  async recall(botId: string, query: string, taskId?: string, found?: RetrievalResult) {
     if(this.personal.settings(botId).version){
       if(!this.personal.enabled(botId))return {status:'disabled',facts:[]};
-      return {status:'available',facts:this.personal.recall(botId,query,Math.min(2000,Math.floor(this.store.modelConfig(botId).contextWindow*.05)),taskId)};
+      return {status:'available',facts:await this.personal.recall(botId,query,Math.min(2000,Math.floor(this.store.modelConfig(botId).contextWindow*.05)),taskId,found)};
     }
     return this.ledger.client ? this.ledger.recall(botId,query) : {status:'disabled',facts:[]};
   }

@@ -10,7 +10,6 @@ struct ChatView: View {
     @State private var quote: QuoteDraft?
     @State private var modelChooserOpen = false
     @State private var modelForm = ModelForm(config: nil)
-    @State private var showRoutine = false
     @State private var composerMenu: ComposerMenu?
     @State private var showMemory = false
     @State private var atBottom = true
@@ -29,7 +28,6 @@ struct ChatView: View {
     private var tasks: [AgentTask] { workspace.state?.unfinishedTasks(botID: botID) ?? [] }
     private var processing: Bool { (!tasks.isEmpty || conversation.isSending) && conversation.streaming.isEmpty && approvals.isEmpty }
     private var hasModel: Bool { workspace.state?.config != nil }
-    private var modelName: String { workspace.bot(botID)?.selectedModel ?? workspace.state?.config?.defaultModel.nonEmpty ?? "未连接模型" }
     private var firstPeer: Bot? { workspace.bots.first { $0.id != botID } }
     private var memorySignature: [String: String] {
         Dictionary(uniqueKeysWithValues: (workspace.state?.memories(botID: botID) ?? []).map { ($0.id, "\($0.version):\($0.updatedAt?.timeIntervalSince1970 ?? 0)") })
@@ -39,7 +37,7 @@ struct ChatView: View {
         let conv = conversation
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if focusedID != nil {
                         Button { workspace.showLatest(botID: botID) } label: {
                             Text("返回最新消息").font(.footnote.weight(.medium)).foregroundStyle(Theme.brand)
@@ -57,11 +55,14 @@ struct ChatView: View {
                         .buttonStyle(.plain).disabled(conv.isLoadingOlder).id("older")
                     }
                     ForEach(Array(conv.messages.enumerated()), id: \.element.id) { index, message in
+                        let previous = index > 0 ? conv.messages[index - 1] : nil
+                        let next = index + 1 < conv.messages.count ? conv.messages[index + 1] : nil
                         if let date = message.createdAt,
-                           index == 0 || !Calendar.current.isDate(date, inSameDayAs: conv.messages[index - 1].createdAt ?? .distantPast) {
+                           index == 0 || !Calendar.current.isDate(date, inSameDayAs: previous?.createdAt ?? .distantPast) {
                             DateDivider(date: date)
                         }
-                        MessageRow(message: message, workspace: workspace, botName: bot?.name ?? "Agent",
+                        MessageRow(message: message, workspace: workspace, botName: bot?.name ?? "Agent", bot: bot,
+                                   groupEnd: MessageGrouping.ends(message, next: next),
                                    onQuote: { author, text in quote = QuoteDraft(author: author, text: text) },
                                    onOpenStep: { step in Task { await openStep(step) } },
                                    onOpenPeer: { nav.openChat($0) })
@@ -71,24 +72,26 @@ struct ChatView: View {
                                         .padding(-6).allowsHitTesting(false)
                                 }
                             }
+                            .padding(.top, MessageGrouping.joins(previous, message) ? 4 : 14)
                             .id(message.id)
                     }
                     if conv.isLoaded && conv.messages.isEmpty && conv.streaming.isEmpty && !processing { welcome }
                     ForEach(conv.streaming, id: \.taskId) { part in
-                        StreamingRow(text: part.text, replyingTo: replyingTo(taskID: part.taskId))
+                        StreamingRow(text: part.text, replyingTo: replyingTo(taskID: part.taskId), workspace: workspace, bot: bot).padding(.top, 14)
                     }
                     if processing {
-                        ThinkingIndicator(name: bot?.name ?? "Agent", phrase: tasks.first?.phrase ?? "正在发送…")
+                        ThinkingIndicator(name: bot?.name ?? "Agent", phrase: tasks.first?.phrase ?? "正在发送…", workspace: workspace, bot: bot).padding(.top, 14)
                     }
                     ForEach(approvals) { approval in
                         ApprovalCard(approval: approval, botName: bot?.name ?? "") { allow, remember in await decide(approval, allow: allow, remember: remember) }
+                            .padding(.top, 14)
                     }
-                    ForEach(delegatedPeers, id: \.self) { peerID in delegatedLine(peerID) }
+                    ForEach(delegatedPeers, id: \.self) { peerID in delegatedLine(peerID).padding(.top, 14) }
                     Color.clear.frame(height: 1).id(bottomID)
                         .onAppear { atBottom = true }
                         .onDisappear { atBottom = false }
                 }
-                .padding(.horizontal, 16).padding(.vertical, 8)
+                .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 16)
             }
             .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
@@ -106,10 +109,9 @@ struct ChatView: View {
             .overlay(alignment: .bottom) {
                 if !atBottom && conv.messages.count > 3 && focusedID == nil {
                     Button { scrollToBottom(proxy) } label: {
-                        Image(systemName: "arrow.down").font(.system(size: 20, weight: .regular))
-                            .frame(width: 44, height: 44)
-                            .background(Theme.card, in: Circle()).overlay(Circle().stroke(Theme.border))
-                            .shadow(color: .black.opacity(0.04), radius: 3, y: 1)
+                        Image(systemName: "arrow.down").font(.system(size: 17, weight: .regular))
+                            .frame(width: 40, height: 40)
+                            .glass(Circle(), strong: true, lift: .card)
                     }
                     .buttonStyle(.plain).accessibilityLabel("回到底部").foregroundStyle(Theme.foreground).padding(.bottom, 10)
                     .transition(.opacity)
@@ -156,23 +158,23 @@ struct ChatView: View {
             }
             return Markdown.isOpenable(url) ? .systemAction : .discarded
         })
-        .background { WorkspaceSurface(kind: .reading) }
+        .background { WorkspaceSurface(kind: .stage) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
-        .toolbarBackground(Theme.background, for: .navigationBar)
+        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if let transcript = workspace.exportTranscript(botID: botID) {
-                    ShareLink(item: transcript) { Image(systemName: "square.and.arrow.up") }
+                    ShareLink(item: transcript) { Image(systemName: "square.and.arrow.up").font(.system(size: 14, weight: .medium)).frame(width: 32, height: 32) }
                         .accessibilityLabel("复制对话记录")
                 }
-                Button { nav.openAgentDetail(botID) } label: { Image(systemName: "info.circle") }
+                Button { nav.openAgentDetail(botID) } label: { Image(systemName: "sidebar.right").font(.system(size: 14, weight: .medium)).frame(width: 32, height: 32) }
                     .accessibilityLabel("助手详情")
             }
             ToolbarItem(placement: .principal) { titleView }
         }
         .errorAlert($errorText)
-        .sheet(isPresented: $showRoutine) { RoutineEditorSheet(workspace: workspace, botID: botID) }
         .sheet(isPresented: $showMemory) { MemoryEditorSheet(workspace: workspace, botID: botID) }
         .onAppear {
             workspace.select(botID)
@@ -200,7 +202,6 @@ struct ChatView: View {
             }
             case "filechip": Task { await openFile(arg) }
             case "toolstep": if let step = conv.messages.reversed().compactMap({ $0.toolSteps.last }).first { Task { await openStep(step) } }
-            case "chatroutine": showRoutine = true
             case "chatmemory": showMemory = true
             default: break
             }
@@ -224,29 +225,26 @@ struct ChatView: View {
         return tasks.count > 1 ? "\(first.phrase) · \(tasks.count) 项工作正在进行" : first.phrase
     }
 
+    /// The compact title capsule: avatar, name and status; it opens the agent detail.
     private var titleView: some View {
         Button { nav.openAgentDetail(botID) } label: {
             HStack(spacing: 8) {
                 if let bot { workspace.avatar(of: bot, size: 28, animated: true) }
                 VStack(alignment: .leading, spacing: 0) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 6) { nameText; modelPill }
-                        nameText
-                    }
-                    Text(subtitle).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1)
+                    nameText
+                    Text(subtitle).font(.system(size: 10.5)).foregroundStyle(tasks.isEmpty ? Theme.muted : Theme.identityAccent).lineLimit(1)
                 }
+                .frame(maxWidth: 150, alignment: .leading)
             }
+            .padding(.leading, 5).padding(.trailing, 14).padding(.vertical, 4)
+            .glass(Capsule(), lift: .card)
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(bot?.name ?? "Agent") 助手详情")
     }
 
-    private var nameText: some View { Text(bot?.name ?? "会话").font(.subheadline.weight(.semibold)).lineLimit(1) }
-
-    private var modelPill: some View {
-        Text(modelName).font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.muted).lineLimit(1).fixedSize()
-            .padding(.horizontal, 6).padding(.vertical, 1).background(Theme.secondary, in: Capsule())
-    }
+    private var nameText: some View { Text(bot?.name ?? "会话").font(.system(size: 13.5, weight: .semibold)).lineLimit(1) }
 
     // MARK: Banners
 
@@ -263,19 +261,20 @@ struct ChatView: View {
                     .frame(maxHeight: 320)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .frame(maxWidth: .infinity).background(Theme.approvalSoft)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Theme.approvalSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 12).padding(.vertical, 4)
     }
 
     private func memoryPill(_ title: String) -> some View {
         Button { memoryNotice = nil } label: {
             Label(title, systemImage: "sparkles").font(.footnote.weight(.medium)).lineLimit(1)
                 .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Theme.brandSoft, in: Capsule())
+                .glass(Capsule(), strong: true, lift: .card)
         }
-        .buttonStyle(.plain).foregroundStyle(Theme.brand)
+        .buttonStyle(.plain).foregroundStyle(Theme.identityAccent)
         .accessibilityHint("点按关闭")
-        .frame(maxWidth: .infinity).padding(.vertical, 6).background(Theme.background)
+        .frame(maxWidth: .infinity).padding(.vertical, 6)
     }
 
     // MARK: Transcript parts
@@ -288,9 +287,8 @@ struct ChatView: View {
             Text(bot?.name ?? "").font(.title3.weight(.bold))
             Text(bot?.instructions.nonEmpty ?? "我是你的专属智能同伴。你可以直接向我提问、安排定时任务，或输入 @ 让我与团队其他成员协作。")
                 .font(.subheadline).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
-            Text("直接发消息，或为我安排一项例行任务。").font(.footnote).foregroundStyle(Theme.muted)
+            Text("直接发消息，让我帮你安排任务。").font(.footnote).foregroundStyle(Theme.muted)
             FlowLayout(spacing: 8) {
-                Chip(title: "安排例行任务", icon: "clock") { showRoutine = true }
                 Chip(title: "添加长期记忆", icon: "sparkles") { showMemory = true }
                 if let peer = firstPeer {
                     Chip(title: "让 \(peer.name) 协作", icon: "person.2") { conversation.draft = "@\(peer.name) " }

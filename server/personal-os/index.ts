@@ -11,6 +11,7 @@ import { TaskRuntime } from "./runtime.ts";
 import { DeviceGateway } from "./devices.ts";
 import { DeviceNode } from "./node.ts";
 import { AgentModule } from "./agents.ts";
+import { TodoModule, TodoConflict } from "./todos.ts";
 import { RoutineModule } from "./routines.ts";
 import { ClientIdentity } from "./clients.ts";
 import { CoreIdentity } from "./identity.ts";
@@ -31,8 +32,9 @@ import { modelLimitScope, type ModelCatalogConfig } from "./model-limits.ts";
 import { ClientDownloadsSource, type ClientDownloadsOptions } from "./client-downloads.ts";
 import { approvalRuleLabel, approvalRuleScope, approvalRules, revokeApprovalRule } from "./approval-rules.ts";
 import { ClientUpdateSource, type OssReleaseMirror } from "./client-updates.ts";
+import type { RetrievalDefaults } from "./retrieval-config.ts";
 
-export interface AppOptions { gmail?: GmailConfiguration; attachmentObjects?: AttachmentObjects; releaseMirror?: Pick<OssReleaseMirror, "manifest" | "signedUrl">; modelCatalog?: ModelCatalogConfig; clientDownloads?: ClientDownloadsOptions; accountWorkspaces?: boolean; publicCoreId?: string; serviceOrigin?: string; listen?: false; hostDevice?: false; dir: string; key: Buffer; token: string; port?: number; strictPort?: boolean; host?: string; publicOrigin?: string; /** Set only when a trusted local reverse proxy overwrites X-Forwarded-For with the real client address. */ trustProxy?: boolean; uiDir?: string; hindsight?: { endpoint: string; token: string }; memoryRuntime?: false; /** Only direct disposable test fixtures may opt out. Production service CLI never disables identity. */ identity?: false | { fixtureOrigin: string }; /** Only disposable test fixtures may inject a fake Feishu registration or transport. */ feishu?: { registerApp: RegisterAppFn; transport?: TransportFactory; fetchImpl?: typeof fetch } }
+export interface AppOptions { /** Server-wide defaults for memory retrieval models (from the environment); a user's own settings win. */ retrieval?: RetrievalDefaults; gmail?: GmailConfiguration; attachmentObjects?: AttachmentObjects; releaseMirror?: Pick<OssReleaseMirror, "manifest" | "signedUrl">; modelCatalog?: ModelCatalogConfig; clientDownloads?: ClientDownloadsOptions; accountWorkspaces?: boolean; publicCoreId?: string; serviceOrigin?: string; listen?: false; hostDevice?: false; dir: string; key: Buffer; token: string; port?: number; strictPort?: boolean; host?: string; publicOrigin?: string; /** Set only when a trusted local reverse proxy overwrites X-Forwarded-For with the real client address. */ trustProxy?: boolean; uiDir?: string; hindsight?: { endpoint: string; token: string }; memoryRuntime?: false; /** Only direct disposable test fixtures may opt out. Production service CLI never disables identity. */ identity?: false | { fixtureOrigin: string }; /** Only disposable test fixtures may inject a fake Feishu registration or transport. */ feishu?: { registerApp: RegisterAppFn; transport?: TransportFactory; fetchImpl?: typeof fetch } }
 
 export async function createPersonalApp(options: AppOptions) {
   if (options.publicOrigin) { const publicUrl = new URL(options.publicOrigin); if (publicUrl.protocol !== "https:" || publicUrl.username || publicUrl.password || publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash) throw new Error("公共 Core 地址须为 HTTPS 根地址"); }
@@ -58,6 +60,7 @@ export async function createPersonalApp(options: AppOptions) {
     feishu?.scanApprovals();
   };
   const runtime = new TaskRuntime(store, changed);
+  runtime.memory.retrieval.config.defaults = options.retrieval ?? {};
   const connectors = new ConnectorModule(store, changed, options.gmail);
   runtime.connectorExecutor = (call, args, authorize) => feishu?.handles(args) ? feishu.execute(call, args, authorize) : connectors.execute(call, args, authorize);
   runtime.connectorDirectory = (botId) => connectors.directory(botId);
@@ -79,10 +82,18 @@ export async function createPersonalApp(options: AppOptions) {
   const memoryPlugin = new ExternalMemoryPlugin(store, runtime.memory.ledger, changed);
 
   const agents = new AgentModule(store, runtime);
+  runtime.memory.retrieval.resolveEntry = (botId, entryId) => {
+    const [entry] = agents.search(botId, `entry:${entryId}`) as Array<{ id?: string; content?: unknown }>;
+    return entry && typeof entry.content === "string" ? { id: entryId, content: entry.content } : undefined;
+  };
   const files = new ChatFiles(store);
   const routines = new RoutineModule(store, agents);
+  const todos = new TodoModule(store, agents);
+  runtime.todoExecutor = (call, args) => todos.tool(call, args);
   runtime.routineExecutor = (call, args) => routines.tool(call, args);
   runtime.agentExecutor = (call, args) => agents.tool(call, args);
+  // A change of who may see a topic is told in the conversation where the user asked for it.
+  runtime.memory.personal.tree.notify = (botId, taskId, text, key) => agents.publish(botId, "system", "activity", text, key, taskId);
   feishu = new FeishuModule(store, changed, agents, runtime, {
     ...(options.feishu ?? { registerApp: sdkRegisterApp, transport: wsTransportFactory }),
     grantTools: (connectorId, version, botId, tools) => { connectors.grant({ id: connectorId, version, botId, tools }); },
@@ -98,7 +109,7 @@ export async function createPersonalApp(options: AppOptions) {
   let requestRouter: ((request: IncomingMessage, response: ServerResponse) => Promise<boolean>) | undefined;
   const server = createServer((request, response) => { void (async () => { if (!await requestRouter?.(request, response)) await route(request, response); })().catch((error: unknown) => {
     if (response.headersSent) { response.end(); return; }
-    json(response, error instanceof IdentityError ? error.status : 400, { error: error instanceof Error ? error.message : "请求失败", ...(error instanceof IdentityError && error.status === 503 ? { code: "identity_unavailable" } : {}) });
+    json(response, error instanceof IdentityError || error instanceof TodoConflict ? error.status : 400, { error: error instanceof Error ? error.message : "请求失败", ...(error instanceof IdentityError && error.status === 503 ? { code: "identity_unavailable" } : {}) });
   }); });
   const gateway = new DeviceGateway(store, server, () => { if (closing) return; runtime.completeDelegations(); runtime.startRecovered(); changed(); });
   runtime.deviceExecutor = (call, args) => gateway.execute(call, args);
@@ -286,6 +297,18 @@ export async function createPersonalApp(options: AppOptions) {
         streams.set(response, token); response.write(`id: ${event.cursor}\nevent: change\ndata: ${JSON.stringify(event)}\n\n`); request.once("close", () => streams.delete(response)); return;
       }
       if (url.pathname === "/api/clients" && request.method === "GET") { json(response, 200, { sessions: clients.list(), currentSessionId: session.id }); return; }
+      if (url.pathname === "/api/memory/retrieval" && request.method === "GET") {
+        if (session.user_id !== store.owner) { json(response, 403, { error: "此账号没有读取记忆检索设置的权限" }); return; }
+        json(response, 200, runtime.memory.retrieval.config.view()); return;
+      }
+      if (url.pathname === "/api/memory/core" && request.method === "GET") {
+        if (session.user_id !== store.owner) { json(response, 403, { error: "此账号没有读取核心记忆的权限" }); return; }
+        json(response, 200, runtime.memory.core.view(text(url.searchParams.get("botId"), 100))); return;
+      }
+      if (url.pathname.startsWith("/api/todos")) {
+        if (session.user_id !== store.owner) { json(response,403,{error:"此账号没有管理待办的权限"});return; }
+        if (url.pathname === "/api/todos" && request.method === "GET") { json(response,200,{items:todos.list()});return; }
+      }
       if (url.pathname === "/api/state") {
         const view = url.searchParams.get("view") === "summary" ? "summary" : "full";
         json(response, 200, stateBody(view, requestOrigin)); return;
@@ -303,7 +326,10 @@ export async function createPersonalApp(options: AppOptions) {
         const around=url.searchParams.get('around');
         if(around&&(before!==undefined||after!==undefined))throw new Error('消息位置无效');
         const messages = around ? agents.messagesAround(botId,text(around,100)) : after === undefined ? agents.messages(botId, before) : agents.messagesAfter(botId, after);
-        json(response, 200, { sync: sync.snapshot(), messages, hasMore: after !== undefined && messages.length === 200, streaming: [...runtime.workers.values()].filter((w) => store.get("SELECT bot_id FROM tasks WHERE id=?", w.taskId)?.bot_id === botId).map((w) => ({ taskId: w.taskId, text: w.streaming })) }); return;
+        json(response, 200, { sync: sync.snapshot(), messages, hasMore: after !== undefined && messages.length === 200, streaming: [...runtime.workers.values()].filter((w) => store.get("SELECT t.bot_id FROM tasks t JOIN agent_task_links l ON l.task_id=t.id WHERE t.id=? AND l.origin='owner'", w.taskId)?.bot_id === botId).map((w) => ({ taskId: w.taskId, text: w.streaming })) }); return;
+      }
+      if (url.pathname === "/api/routines/occurrence" && request.method === "GET") {
+        json(response, 200, routines.occurrence(text(url.searchParams.get("id"), 256))); return;
       }
       if (url.pathname === "/api/messages" && request.method === "GET") {
         const conv = text(url.searchParams.get("conversation"), 100);
@@ -396,19 +422,23 @@ export async function createPersonalApp(options: AppOptions) {
         json(response, 202, result); return;
       }
       if (url.pathname === "/api/agents/read") { agents.read(text(data.botId, 100), Number(data.seq)); changed(); json(response, 200, { ok: true }); return; }
+      if (url.pathname === "/api/agents/topic") { json(response, 200, agents.newTopic(text(data.botId, 100))); return; }
       if (url.pathname === "/api/agents/messages/image/delete") {
         const result = await files.deleteMessageImage(text(data.botId, 100), text(data.messageId, 100), text(data.attachmentId, 100));
         changed(); json(response, 200, result); return;
       }
+      if (url.pathname === "/api/todos/save") { json(response,200,todos.save(data));return; }
+      if (url.pathname === "/api/todos/action") { json(response,200,todos.action(data,String(session.id)));return; }
       if (url.pathname === "/api/routines") { json(response, 200, routines.save(data)); return; }
       if (url.pathname === "/api/routines/toggle") { if (typeof data.enabled !== "boolean") throw new Error("启用状态无效"); routines.toggle(text(data.id, 100), Number(data.version), data.enabled); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/routines/run") { routines.runNow(text(data.id, 100), text(data.clientId, 100)); json(response, 200, { ok: true }); return; }
+      if (url.pathname === "/api/routines/delete") { routines.remove(text(data.id, 100), Number(data.version)); json(response, 200, { ok: true }); return; }
       if (url.pathname === "/api/models/limits" || url.pathname === "/api/models/limits/refresh") {
         if (session.user_id !== store.owner) { json(response, 403, { error: "此账号没有读取模型配置的权限" }); return; }
         const scope = modelLimitScope(data);
         const refresh = url.pathname.endsWith("/refresh") ? await store.modelLimits.catalog.refresh({ force: data.force === true }) : undefined;
         if (!await authenticate(token)) throw new IdentityError(401, "登录已失效，请重新登录");
-        const automatic = store.modelLimits.resolve(scope, { contextWindow: null, maxOutputTokens: null });
+        const automatic = store.modelLimits.resolve(scope, { contextWindow: null, maxOutputTokens: null, contextBudget: null });
         json(response, 200, { ...store.modelLimitSettings(scope), automatic, refresh }); return;
       }
       if (url.pathname === "/api/models/visibility") {
@@ -447,6 +477,18 @@ export async function createPersonalApp(options: AppOptions) {
         if(session.user_id!==store.owner){json(response,403,{error:'此账号没有修改记忆设置的权限'});return;}
         if(data.botId){throw new Error('记忆已改为统一开关，请更新客户端后设置');}
         json(response,200,runtime.memory.personal.saveGlobal(data));return;
+      }
+      if(url.pathname==='/api/memory/retrieval'){
+        if(session.user_id!==store.owner){json(response,403,{error:'此账号没有修改记忆检索设置的权限'});return;}
+        const saved=await runtime.memory.retrieval.config.save(data,async()=>{const current=await authenticate(token);if(!current||current.user_id!==store.owner)throw new IdentityError(401,'登录已失效，请重新登录');});
+        changed();json(response,200,saved);return;
+      }
+      if(url.pathname==='/api/memory/core'){
+        if(session.user_id!==store.owner){json(response,403,{error:'此账号没有修改核心记忆的权限'});return;}
+        // The owner replaces one scope's two lists; the same version check and 1500-token cap as the model's patch.
+        const botId=text(data.botId,100);
+        runtime.memory.core.replace(data.scope==='workspace'?'workspace':'bot',botId,{about:data.about,topics:data.topics},data.version);
+        changed();json(response,200,runtime.memory.core.view(botId));return;
       }
       if(url.pathname==='/api/memory/summary'){
         if(session.user_id!==store.owner){json(response,403,{error:'此账号没有读取记忆用量的权限'});return;}
@@ -507,6 +549,7 @@ export async function createPersonalApp(options: AppOptions) {
   runtime.memory.ledger.start();
   runtime.memory.personal.start();
   runtime.startRecovered();
+  runtime.scheduleStartupMaintenance();
   routines.start();
   let archiveJob: Promise<unknown> | undefined;
   const archive = () => {

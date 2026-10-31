@@ -27,6 +27,11 @@ public enum RoutineSchedule: Sendable, Hashable {
     case interval(minutes: Int)
     case once(at: Date)
     public var kind: ScheduleKind { switch self { case .daily: .daily; case .interval: .interval; case .once: .once } }
+
+    /// Editing an existing one-off may retain its original past time without scheduling another run.
+    public static func acceptsOnceDate(_ date: Date, existing: Routine?, now: Date = Date()) -> Bool {
+        date > now || (existing?.scheduleKind == .once && existing?.runAt == date)
+    }
 }
 
 /// Body of `routines`. Omit `id` to create; pass `id` and the row's `version` to edit.
@@ -34,9 +39,10 @@ public struct RoutineDraft: Sendable, Hashable {
     public var botID: String, name: String, prompt: String
     public var schedule: RoutineSchedule
     public var timeZone: String
+    public var taskKind: RoutineTaskKind?
     public var id: String?, version: Int?
-    public init(botID: String, name: String, prompt: String, schedule: RoutineSchedule, timeZone: String = TimeZone.current.identifier, id: String? = nil, version: Int? = nil) {
-        self.botID = botID; self.name = name; self.prompt = prompt; self.schedule = schedule; self.timeZone = timeZone; self.id = id; self.version = version
+    public init(botID: String, name: String, prompt: String, schedule: RoutineSchedule, timeZone: String = TimeZone.current.identifier, id: String? = nil, version: Int? = nil, taskKind: RoutineTaskKind? = nil) {
+        self.botID = botID; self.name = name; self.prompt = prompt; self.schedule = schedule; self.timeZone = timeZone; self.id = id; self.version = version; self.taskKind = taskKind
     }
 }
 
@@ -44,8 +50,9 @@ struct RoutineBody: Encodable {
     let botId: String, name: String, prompt: String, scheduleKind: String, timeZone: String
     let localTime: String?, intervalMinutes: Int?, runAt: Int?
     let id: String?, version: Int?
+    let taskKind: RoutineTaskKind?
     init(_ d: RoutineDraft) {
-        botId = d.botID; name = d.name; prompt = d.prompt; scheduleKind = d.schedule.kind.rawValue; timeZone = d.timeZone; id = d.id; version = d.version
+        botId = d.botID; name = d.name; prompt = d.prompt; scheduleKind = d.schedule.kind.rawValue; timeZone = d.timeZone; id = d.id; version = d.version; taskKind = d.taskKind
         switch d.schedule {
         case .daily(let t): localTime = t; intervalMinutes = nil; runAt = nil
         case .interval(let m): localTime = nil; intervalMinutes = m; runAt = nil
@@ -116,9 +123,11 @@ public struct ModelSettings: Sendable, Hashable, Encodable {
     public var contextWindow: LimitSetting
     /// Max output token override; independent of ``contextWindow`` (it may even exceed it).
     public var maxOutputTokens: LimitSetting
-    public init(provider: String, model: String, endpoint: String, apiKey: String? = nil, contextWindow: LimitSetting = .preserve, maxOutputTokens: LimitSetting = .preserve) {
+    /// Working context override (the token budget that triggers context reduction); omitted by default.
+    public var contextBudget: LimitSetting
+    public init(provider: String, model: String, endpoint: String, apiKey: String? = nil, contextWindow: LimitSetting = .preserve, maxOutputTokens: LimitSetting = .preserve, contextBudget: LimitSetting = .preserve) {
         self.provider = provider; self.model = model; self.endpoint = endpoint; self.apiKey = apiKey
-        self.contextWindow = contextWindow; self.maxOutputTokens = maxOutputTokens
+        self.contextWindow = contextWindow; self.maxOutputTokens = maxOutputTokens; self.contextBudget = contextBudget
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: AnyKey.self)
@@ -131,7 +140,7 @@ public struct ModelSettings: Sendable, Hashable, Encodable {
             case .manual(let n): try c.encode(n, forKey: .init(key))
             }
         }
-        try put(contextWindow, "contextWindow"); try put(maxOutputTokens, "maxOutputTokens")
+        try put(contextWindow, "contextWindow"); try put(maxOutputTokens, "maxOutputTokens"); try put(contextBudget, "contextBudget")
     }
 }
 
@@ -274,9 +283,11 @@ struct AppearanceBody: Encodable { let id: String; let appearance: AppearanceCho
 struct PolicyBody: Encodable { let id: String; let version: Int; let tools: [String] }
 struct RoutineToggleBody: Encodable { let id: String; let version: Int; let enabled: Bool }
 struct RoutineRunBody: Encodable { let id: String; let clientId: String }
+struct RoutineDeleteBody: Encodable { let id: String; let version: Int }
 struct ConnectorToggleBody: Encodable { let id: String; let version: Int; let enabled: Bool }
 struct ConnectorGrantBody: Encodable { let id: String; let version: Int; let botId: String; let tools: [String] }
 struct FeishuBotBody: Encodable { let botId: String }
+struct TopicBody: Encodable { let botId: String }
 struct FeishuIDBody: Encodable { let id: String }
 struct FeishuSaveBody: Encodable { let appId: String; let appSecret: String; let brand: String; let botId: String }
 struct FeishuToggleBody: Encodable { let id: String; let version: Int; let enabled: Bool }
@@ -299,6 +310,10 @@ struct IDResult: Decodable, Sendable {
 struct CountResult: Decodable, Sendable {
     let count: Int
     init(from decoder: Decoder) throws { count = try decoder.container(keyedBy: AnyKey.self).lenient(.init("count"))?.intValue ?? 0 }
+}
+struct MarkedResult: Decodable, Sendable {
+    let marked: Bool
+    init(from decoder: Decoder) throws { marked = try decoder.container(keyedBy: AnyKey.self).lenient(.init("marked"))?.boolValue ?? false }
 }
 struct ProviderResult: Decodable, Sendable {
     let provider: String
@@ -331,6 +346,12 @@ extension CoreClient {
     }
     /// `POST /api/bots/archive`. `version` is `Bot.version`.
     public func archiveBot(id: String, version: Int) async throws { try await post("/api/bots/archive", body: IDVersion(id: id, version: version)) }
+    /// `POST /api/agents/topic`: the agent's next message opens a new conversation episode. Returns Core's `marked`
+    /// (false when the agent has no open conversation yet). While the conversation is working Core refuses
+    /// ("请等待当前任务结束后再开启新话题").
+    public func newTopic(bot: String) async throws -> Bool {
+        try await post("/api/agents/topic", body: TopicBody(botId: bot), as: MarkedResult.self).marked
+    }
     /// `POST /api/resume` for a paused task.
     public func resume(task: String) async throws { try await post("/api/resume", body: TaskBody(taskId: task)) }
 
@@ -342,6 +363,11 @@ extension CoreClient {
     }
     /// `POST /api/routines/run`. The same `clientID` is idempotent.
     public func runRoutine(id: String, clientID: String) async throws { try await post("/api/routines/run", body: RoutineRunBody(id: id, clientId: clientID)) }
+
+    /// Stops future scheduling while preserving existing execution records.
+    public func deleteRoutine(id: String, version: Int) async throws {
+        try await post("/api/routines/delete", body: RoutineDeleteBody(id: id, version: version))
+    }
 
     // Connectors
     /// `POST /api/connectors/save`. Returns the connector id.
@@ -445,6 +471,21 @@ extension CoreClient {
     /// `POST /api/memory/forget` with the preview's `revision`.
     public func forget(bot: String, query: String, revision: String) async throws -> ForgetResult {
         try await post("/api/memory/forget", body: ForgetBody(botId: bot, query: query, revision: revision))
+    }
+
+    /// `GET /api/memory/retrieval` (owner only; others get 403).
+    public func retrievalSettings() async throws -> RetrievalView { try await get("/api/memory/retrieval") }
+    /// `POST /api/memory/retrieval` (owner only). Core tests the settings with a real request before storing them, which
+    /// takes up to 15 s; a failed test or a stale version throws Core's text. Returns the stored view of both items.
+    public func saveRetrieval(_ request: RetrievalSaveRequest) async throws -> RetrievalView {
+        try await post("/api/memory/retrieval", request, timeout: 40)
+    }
+    /// `GET /api/memory/core?botId=` (owner only).
+    public func coreMemory(bot: String) async throws -> CoreMemoryView { try await get("/api/memory/core", query: [("botId", bot)]) }
+    /// `POST /api/memory/core` (owner only): replaces both lists of one scope. `version` is that scope's
+    /// ``CoreMemoryEntry/version``. Core refuses lines over 1500 tokens in total and a stale version. Returns the view of `bot`.
+    public func saveCoreMemory(bot: String, scope: CoreMemoryScope, about: [String], topics: [CoreMemoryTopic], version: Int) async throws -> CoreMemoryView {
+        try await post("/api/memory/core", CoreMemorySaveBody(botId: bot, scope: scope.rawValue, about: about, topics: topics, version: version), timeout: 20)
     }
 
     // Preview

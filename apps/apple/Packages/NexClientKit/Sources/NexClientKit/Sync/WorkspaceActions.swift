@@ -1,6 +1,6 @@
 import Foundation
 
-/// One async throwing method per user action. Each one echoes the version of the *current* row, routes failures
+/// One async throwing method per user action. Mutations echo their row's version and route failures
 /// through `report` (so an expired session ends the app session) and throws the ``CoreError`` with Core's Chinese
 /// message. Mutations call ``WorkspaceStore/refresh()`` after success; read-only calls (recall, preview, ...) do not.
 extension WorkspaceStore {
@@ -51,6 +51,13 @@ extension WorkspaceStore {
         let b = try currentBot(botID)
         try await act { try await client.updateApprovalMode(id: botID, mode: mode, version: b.approvalModeVersion) }
     }
+    /// 新话题: the agent's next message opens a new conversation episode. Returns whether Core marked the boundary.
+    /// Core refuses while the conversation is working ("请等待当前任务结束后再开启新话题").
+    @discardableResult
+    public func startNewTopic(botID: String) async throws -> Bool {
+        _ = try currentBot(botID)
+        return try await act { try await client.newTopic(bot: botID) }
+    }
     /// Downloads a sent attachment (`AttachmentLink.id`). The suggested file name comes from Core.
     public func downloadAttachment(id: String) async throws -> (data: Data, filename: String) {
         try await act(refresh: false) { try await client.downloadAttachment(id: id) }
@@ -67,11 +74,12 @@ extension WorkspaceStore {
 
     // MARK: Routines
 
-    /// Creates (`existing == nil`) or edits a routine; the version comes from the current row. Returns the routine id.
+    /// Keeps the editor's original version so concurrent changes are rejected instead of overwritten.
     @discardableResult
-    public func saveRoutine(botID: String, existing: Routine? = nil, name: String, prompt: String, schedule: RoutineSchedule, timeZone: String = TimeZone.current.identifier) async throws -> String {
-        var draft = RoutineDraft(botID: botID, name: name, prompt: prompt, schedule: schedule, timeZone: timeZone)
-        if let existing { draft.id = existing.id; draft.version = (try? currentRoutine(existing.id))?.version ?? existing.version }
+    public func saveRoutine(botID: String, existing: Routine? = nil, name: String, prompt: String, schedule: RoutineSchedule, timeZone: String = TimeZone.current.identifier, taskKind: RoutineTaskKind? = nil) async throws -> String {
+        if case .interval(let minutes) = schedule, !(5...525_600).contains(minutes) { throw missing("间隔须为 5 分钟至 365 天") }
+        var draft = RoutineDraft(botID: botID, name: name, prompt: prompt, schedule: schedule, timeZone: timeZone, taskKind: taskKind)
+        if let existing { draft.id = existing.id; draft.version = existing.version }
         return try await act { try await client.saveRoutine(draft) }
     }
     public func setRoutineEnabled(_ routine: Routine, enabled: Bool) async throws {
@@ -81,6 +89,15 @@ extension WorkspaceStore {
     /// Runs now. Pass the same `clientID` when retrying so the run is not duplicated.
     public func runRoutine(_ routine: Routine, clientID: String = UUID().uuidString) async throws {
         try await act { try await client.runRoutine(id: routine.id, clientID: clientID) }
+    }
+
+    /// Uses the confirmed snapshot version; concurrent edits must be reviewed before deleting.
+    public func deleteRoutine(_ routine: Routine) async throws {
+        try await act { try await client.deleteRoutine(id: routine.id, version: routine.version) }
+    }
+
+    public func routineOccurrence(id: String) async throws -> RoutineOccurrenceDetail {
+        try await act(refresh: false) { try await client.get("/api/routines/occurrence", query: [("id", id)]) }
     }
 
     // MARK: Connectors
@@ -185,11 +202,11 @@ extension WorkspaceStore {
 
     // MARK: Settings
 
-    /// Saves the model connection. `contextWindow` / `maxOutputTokens` are tri-state: ``LimitSetting/preserve`` (default) keeps
+    /// Saves the model connection. `contextWindow` / `maxOutputTokens` / `contextBudget` are tri-state: ``LimitSetting/preserve`` (default) keeps
     /// the saved override for this provider + endpoint + model, `.automatic` clears it, `.manual(n)` sets it.
     public func saveModel(provider: String, model: String, endpoint: String, apiKey: String = "",
-                          contextWindow: LimitSetting = .preserve, maxOutputTokens: LimitSetting = .preserve) async throws {
-        try await act { try await client.saveModel(ModelSettings(provider: provider, model: model, endpoint: endpoint, apiKey: apiKey.isEmpty ? nil : apiKey, contextWindow: contextWindow, maxOutputTokens: maxOutputTokens)) }
+                          contextWindow: LimitSetting = .preserve, maxOutputTokens: LimitSetting = .preserve, contextBudget: LimitSetting = .preserve) async throws {
+        try await act { try await client.saveModel(ModelSettings(provider: provider, model: model, endpoint: endpoint, apiKey: apiKey.isEmpty ? nil : apiKey, contextWindow: contextWindow, maxOutputTokens: maxOutputTokens, contextBudget: contextBudget)) }
     }
     /// Saved overrides and the cached catalog answer for a model (read only, no state refresh, no network lookup).
     public func modelLimits(provider: String, endpoint: String, model: String) async throws -> ModelLimitInfo {
@@ -245,6 +262,26 @@ extension WorkspaceStore {
     /// Forgets what `preview` listed. Core rejects it when the scope changed since the preview.
     public func forget(botID: String, query: String, preview: ForgetPreview) async throws -> ForgetResult {
         try await act { try await client.forget(bot: botID, query: query, revision: preview.revision) }
+    }
+
+    // MARK: Memory retrieval and core memory (owner only)
+
+    /// The embedding and rerank models of memory retrieval. Read only (no state refresh).
+    public func retrievalSettings() async throws -> RetrievalView {
+        try await act(refresh: false) { try await client.retrievalSettings() }
+    }
+    /// Saves one item after Core's test request succeeds, or (``RetrievalSaveRequest/useDefault(kind:version:)``) drops the
+    /// user's settings. Returns the stored view of both items.
+    public func saveRetrieval(_ request: RetrievalSaveRequest) async throws -> RetrievalView {
+        try await act(refresh: false) { try await client.saveRetrieval(request) }
+    }
+    /// The always-loaded core memory of an assistant and of the workspace. Read only.
+    public func coreMemory(botID: String) async throws -> CoreMemoryView {
+        try await act(refresh: false) { try await client.coreMemory(bot: botID) }
+    }
+    /// Replaces both lists of one scope; `version` is that scope's ``CoreMemoryEntry/version`` from the last read.
+    public func saveCoreMemory(botID: String, scope: CoreMemoryScope, about: [String], topics: [CoreMemoryTopic], version: Int) async throws -> CoreMemoryView {
+        try await act(refresh: false) { try await client.saveCoreMemory(bot: botID, scope: scope, about: about, topics: topics, version: version) }
     }
 
     // MARK: Preview

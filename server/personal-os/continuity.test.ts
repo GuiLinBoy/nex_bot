@@ -2,12 +2,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPersonalApp } from './index.ts';
 import { startFakePersonalMemory } from './testing/fake-personal-memory.ts';
 import { hash } from './store.ts';
-import { assistantCompletion } from './assistant-model.ts';
+import { assistantCompletion, effectiveDailyBudget } from './assistant-model.ts';
 import { ChatFiles } from './chat-files.ts';
+import { tokens } from './token-estimate.ts';
+import { systemPromptText } from './context-tools.ts';
 
 type Fixture={root:string;fake:Awaited<ReturnType<typeof startFakePersonalMemory>>;app:Awaited<ReturnType<typeof createPersonalApp>>;bot:string};
 const fixtures:Fixture[]=[];
@@ -28,6 +30,8 @@ afterEach(async()=>{for(const {app,fake,root} of fixtures.splice(0)){await app.c
 describe('Continuous personal assistant and memory',()=>{
   it('keeps inventory, images and long results through tool continuations and the next user turn while they fit',async()=>{
     const {app,fake,bot}=await fixture();
+    // The standard for "fits" is the working budget; a large explicit one keeps everything complete.
+    app.store.saveConfig({provider:'openai',endpoint:fake.origin+'/v1',model:'fixture-chat',contextWindow:200000,maxOutputTokens:4096,contextBudget:150000});
     app.runtime.deviceDirectory=()=>Array.from({length:25},(_,i)=>({id:`fixture-${i}`,name:`INVENTORY-${i}`,online:true,description:'x'.repeat(250)}));
     const note=app.runtime.memory.write(bot,{title:'当前资料',content:'LONG-RESULT-BEGIN '+ '资料'.repeat(8500)+' LONG-RESULT-END'});
     const files=new ChatFiles(app.store);
@@ -59,21 +63,24 @@ describe('Continuous personal assistant and memory',()=>{
     const checkpoint=app.store.get('SELECT first_entry FROM context_checkpoints WHERE first_entry=last_entry')!;
     expect(app.agents.search(bot,'entry:'+checkpoint.first_entry)[0].content).toContain('OLDER-DETAIL');
   },60000);
-  it('leaves original results intact when a pressure summary is incomplete',async()=>{
+  it('leaves original results intact and reports the capacity error only when every summary failed and the request still does not fit',async()=>{
     const {app,fake,bot}=await fixture();
     const first=app.runtime.memory.write(bot,{title:'前期资料',content:'FAILURE-ORIGINAL '+ '资料'.repeat(9000)});
     const second=app.runtime.memory.write(bot,{title:'最新资料',content:'FAILURE-RECENT '+ '信息'.repeat(9000)});
     fake.scripts.push({action:'memory.read',args:{documentId:first.documentId}},{action:'memory.read',args:{documentId:second.documentId}});
-    fake.setOverride(body=>body.stream?undefined:{choices:[{message:{content:'partial'},finish_reason:'length'}],usage:{prompt_tokens:50,completion_tokens:10}});
+    // The summarizer is cut off at its cap with far more than 30% of the original written: not a usable digest.
+    fake.setOverride(body=>body.stream?undefined:{choices:[{message:{content:'长'.repeat(12000)},finish_reason:'length'}],usage:{prompt_tokens:50,completion_tokens:10}});
     const task=app.agents.send(bot,'保留原文，摘要失败不得丢弃内容','pressure-failure').taskId;
     await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status==='failed',app);
-    expect(app.store.get('SELECT result_summary FROM tasks WHERE id=?',task)?.result_summary).toContain('未完整结束');
+    expect(app.store.get('SELECT result_summary FROM tasks WHERE id=?',task)?.result_summary).toContain('仍超过输入预算');
     expect(app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
     const session=app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!;
     const entries=app.runtime.projection.load(String(session.id))!;
     expect(entries.some(entry=>entry.type==='context_edit')).toBe(false);
     expect(JSON.stringify(entries)).toContain('FAILURE-ORIGINAL');expect(JSON.stringify(entries)).toContain('FAILURE-RECENT');
     expect(fake.requests.filter(row=>row.stream)).toHaveLength(2);
+    // The failure is remembered against the result, with its backoff.
+    expect(app.store.all('SELECT target,attempts FROM compaction_failures')).toHaveLength(1);
   },60000);
   it('pages an oversized result explicitly and retrieves original ranges without re-executing the source tool',async()=>{
     const {app,fake,bot}=await fixture();
@@ -96,6 +103,49 @@ describe('Continuous personal assistant and memory',()=>{
     expect(()=>app.agents.search(bot,page.query,{offset:-1,limit:100})).toThrow('offset');
     expect(()=>app.agents.search(bot,page.query,{limit:100001})).toThrow('limit');
   },60000);
+  // History accepted under a larger window (or earlier projection rules) must
+  // compact when it suddenly far exceeds the summarizer's own window.
+  async function backlog(app:Fixture['app'],bot:string,fake:Fixture['fake'],turns:Array<Array<{action:string;args:Record<string,unknown>}|string>>){
+    // History accepted under a roomy working budget; a large explicit one stands in for it.
+    app.store.saveConfig({provider:'openai',endpoint:fake.origin+'/v1',model:'fixture-chat',contextWindow:400000,maxOutputTokens:4096,contextBudget:400000});
+    for(const [index,script] of turns.entries()){
+      fake.scripts.push(...script);
+      const task=app.agents.send(bot,`积压第 ${index} 轮`,`backlog-${index}`).taskId;
+      await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);
+    }
+    expect(app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
+    app.store.saveConfig({provider:'openai',endpoint:fake.origin+'/v1',model:'fixture-chat',contextWindow:64000,maxOutputTokens:4096,contextBudget:null});
+    const summarizer=fake.requests.length;
+    const task=app.agents.send(bot,'BACKLOG-NEXT：继续','backlog-next').taskId;
+    await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status==='succeeded',app);
+    const compact=fake.requests.slice(summarizer).filter(row=>!row.stream);
+    for(const row of compact)expect(tokens(row.messages)+Number(row.max_tokens)).toBeLessThan(64000);
+    return compact;
+  }
+  it('summarizes dominant old tool results before compacting a backlog larger than the window',async()=>{
+    const {app,fake,bot}=await fixture();
+    const notes=Array.from({length:5},(_,i)=>app.runtime.memory.write(bot,{title:`积压资料 ${i}`,content:`BACKLOG-RESULT-${i} `+'资料'.repeat(6000)}));
+    // One turn holds every result: turn-start digests only touch turns older than the latest completed one.
+    const compact=await backlog(app,bot,fake,[[...notes.map(note=>({action:'memory.read',args:{documentId:note.documentId}})),'已读完']]);
+    expect(compact.filter(row=>JSON.stringify(row).includes('"status\\":\\"succeeded\\"')).length).toBeGreaterThanOrEqual(3);
+    // Long-term memory recall may quote the notes in the system prompt.
+    const last=JSON.stringify((fake.requests.filter(row=>row.stream).at(-1)!.messages as Array<{role:string}>).filter(message=>message.role!=='system'));
+    expect(last).toContain('BACKLOG-NEXT');expect(last).not.toContain('BACKLOG-RESULT-0');
+    const session=app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!;
+    const entries=app.runtime.projection.load(String(session.id))!;
+    const edit=entries.find(entry=>entry.type==='context_edit')!;
+    expect(JSON.stringify(edit)).toContain('工具结果摘要');
+    expect(app.agents.search(bot,'entry:'+(edit as {targetId:string}).targetId)[0].content).toMatch(/BACKLOG-RESULT-\d/);
+  },90000);
+  it('compacts a backlog of long turns in window-sized batches carrying the running summary',async()=>{
+    const {app,fake,bot}=await fixture();
+    const compact=await backlog(app,bot,fake,Array.from({length:5},(_,i)=>[`BACKLOG-REPLY-${i} `+'回答'.repeat(5000)]));
+    expect(compact.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(compact[0])).toContain('BACKLOG-REPLY-0');expect(JSON.stringify(compact[0])).not.toContain('"role\\":\\"summary\\"');
+    expect(JSON.stringify(compact.at(-1))).toContain('"role\\":\\"summary\\"');
+    const last=JSON.stringify(fake.requests.filter(row=>row.stream).at(-1));
+    expect(last).toContain('工作笔记');expect(last).toContain('BACKLOG-NEXT');expect(last).not.toContain('BACKLOG-REPLY-0');
+  },90000);
   it('uses the unified memory model for every assistant and preserves it across toggles and restart',async()=>{
     const {app,bot,fake}=await fixture(),memory=app.runtime.memory.personal;
     memory.saveGlobal({version:0,enabled:true,model:'fixture-memory'});
@@ -155,11 +205,28 @@ describe('Continuous personal assistant and memory',()=>{
     const {app,bot}=await fixture(),other=app.store.createBot('旧关闭助手');
     app.runtime.memory.personal.save(bot,{version:0,enabled:true,model:'fixture-memory',dailyBudget:80000});
     app.store.run('UPDATE assistant_memory_settings SET enabled=0 WHERE bot_id=?',other);
-    app.store.db.exec('DROP TABLE agent_approval_rules; DROP TABLE workspace_memory_settings; DROP TABLE attachment_objects; DROP TABLE image_model_selections; DROP TABLE image_models; DROP INDEX IF EXISTS personal_connector_account; DROP TABLE personal_feishu_apps; DROP TABLE personal_feishu_messages; DROP TABLE personal_feishu_outbound; DELETE FROM schema_migrations WHERE version>=16;');
+    app.store.db.exec('DROP TABLE memory_vectors; DROP TABLE memory_retrieval_settings; DROP TABLE compaction_failures; DROP TABLE assistant_memory_steps; DROP TABLE conversation_episodes; DROP TABLE conversation_episode_search; DROP TABLE conversation_topic_marks; ALTER TABLE assistant_memory_settings DROP COLUMN episode_cursor; DROP TABLE maintenance_runs; DROP INDEX assistant_usage_maintain; ALTER TABLE assistant_usage DROP COLUMN conversation_id; ALTER TABLE model_limit_overrides DROP COLUMN context_budget; DROP TABLE model_calibration; DROP TABLE agent_approval_rules; DROP TABLE workspace_memory_settings; DROP TABLE attachment_objects; DROP TABLE image_model_selections; DROP TABLE image_models; DROP INDEX IF EXISTS personal_connector_account; DROP TABLE personal_feishu_apps; DROP TABLE personal_feishu_messages; DROP TABLE personal_feishu_outbound; DELETE FROM schema_migrations WHERE version>=16 AND version<=35;');
     app.store.db.exec('ALTER TABLE personal_connectors DROP COLUMN provider; ALTER TABLE personal_connectors DROP COLUMN account; ALTER TABLE personal_connectors DROP COLUMN kind;');
     const {CoreStore}=await import('./store.ts');
     const reopened=new CoreStore(app.store.dir,app.store.key,'synthetic-token');
     try {
+      expect(reopened.get('SELECT version FROM schema_migrations WHERE version=29')?.version).toBe(29);
+      expect(reopened.get('SELECT version FROM schema_migrations WHERE version=30')?.version).toBe(30);
+      expect(reopened.get('SELECT version FROM schema_migrations WHERE version=31')?.version).toBe(31);
+      expect(reopened.get('SELECT version FROM schema_migrations WHERE version=32')?.version).toBe(32);
+      expect(reopened.get('SELECT version FROM schema_migrations WHERE version=33')?.version).toBe(33);
+      expect(reopened.get('SELECT COUNT(*) n FROM memory_vectors')?.n).toBe(0);
+      expect(reopened.get('SELECT COUNT(*) n FROM memory_retrieval_settings')?.n).toBe(0);
+      for (const name of ['assistant_memory_search','conversation_episode_search','memory_search']) expect(String(reopened.get('SELECT sql FROM sqlite_master WHERE name=?',name)?.sql)).toContain("tokenize='trigram'");      expect(reopened.get('SELECT COUNT(*) n FROM assistant_memory_steps')?.n).toBe(0);
+      expect(reopened.get('SELECT COUNT(*) n FROM compaction_failures')?.n).toBe(0);
+      expect(reopened.get('SELECT COUNT(*) n FROM conversation_episodes')?.n).toBe(0);
+      expect(reopened.get('SELECT COUNT(*) n FROM conversation_episode_search')?.n).toBe(0);
+      expect(reopened.get('SELECT COUNT(*) n FROM conversation_topic_marks')?.n).toBe(0);
+      expect(reopened.get("SELECT COUNT(*) n FROM pragma_table_info('assistant_memory_settings') WHERE name='episode_cursor'")?.n).toBe(1);
+      expect(reopened.get('SELECT COUNT(*) n FROM maintenance_runs')?.n).toBe(0);
+      expect(reopened.get("SELECT COUNT(*) n FROM pragma_table_info('assistant_usage') WHERE name='conversation_id'")?.n).toBe(1);
+      expect(reopened.get("SELECT COUNT(*) n FROM pragma_table_info('model_limit_overrides') WHERE name='context_budget'")?.n).toBe(1);
+      expect(reopened.get('SELECT COUNT(*) n FROM model_calibration')?.n).toBe(0);
       expect(reopened.get('SELECT enabled FROM workspace_memory_settings')?.enabled).toBe(0);
       expect(reopened.all('SELECT enabled FROM assistant_memory_settings').every(row=>row.enabled===0)).toBe(true);
       expect(reopened.get('SELECT model,daily_budget FROM assistant_memory_settings WHERE bot_id=?',bot)).toMatchObject({model:'fixture-memory',daily_budget:80000});
@@ -198,17 +265,19 @@ describe('Continuous personal assistant and memory',()=>{
     expect(app.agents.search(bot,'entry:'+checkpoints[0].first_entry)).toHaveLength(1);
     expect(app.runtime.memory.personal.monitor(bot).groups.some(row=>row.purpose==='compact')).toBe(true);
   },90000);
-  it('starts after opt-in, uses selected model, builds grounded understanding and reports usage',async()=>{
+  it('starts after opt-in, uses selected model, merges facts into a grounded topic and reports usage',async()=>{
     const {app,fake,bot}=await fixture(),memory=app.runtime.memory.personal;
     app.agents.publish(bot,'user','message','旧历史不得自动导入','old');
     memory.save(bot,{version:0,enabled:true,model:'fixture-memory',dailyBudget:100000});
     app.agents.publish(bot,'user','message','这个项目先讨论完整方案，再实现','new');
     await memory.flush();
-    expect(fake.requests).toHaveLength(3);expect(fake.requests.every(request=>request.model==='fixture-memory')).toBe(true);
+    // One extraction call and one topic merge; the migration of an empty memory makes no call.
+    expect(fake.requests).toHaveLength(2);expect(fake.requests.every(request=>request.model==='fixture-memory')).toBe(true);
     expect(JSON.stringify(fake.requests)).not.toContain('旧历史不得自动导入');
-    expect(memory.rows(bot).map(row=>row.kind)).toEqual(expect.arrayContaining(['fact','observation','understanding']));
-    expect(memory.monitor(bot).totals).toMatchObject({input_tokens:1200,output_tokens:240,cache_read:300,unknown_calls:0});
-    const recalled=memory.recall(bot,'项目方案');expect(recalled.length).toBeGreaterThan(0);
+    expect(memory.rows(bot).map(row=>row.kind).sort()).toEqual(['fact','topic']);
+    expect(memory.monitor(bot).totals).toMatchObject({input_tokens:800,output_tokens:160,cache_read:200,unknown_calls:0});
+    expect(await memory.recall(bot,'完全无关的天气')).toEqual([]);
+    const recalled=await memory.recall(bot,'讨论完整方案');expect(recalled).toHaveLength(1);expect(recalled[0]).toMatchObject({kind:'topic',sourceClass:'synthesized'});
     expect(app.runtime.memory.expand(bot,recalled[0].refs[0]).content).toContain('讨论完整方案');
     const other=app.store.createBot('另一助手');expect(()=>app.runtime.memory.expand(other,recalled[0].refs[0])).toThrow();
   });
@@ -226,7 +295,7 @@ describe('Continuous personal assistant and memory',()=>{
     let release!:()=>void;fake.setOverride(async()=>{await new Promise<void>(resolve=>{release=resolve;});return undefined;});
     const job=memory.flush();await wait(()=>!!release,app);
     memory.save(bot,{version:1,enabled:false,dailyBudget:100000});release();await job;
-    expect(memory.rows(bot)).toHaveLength(0);expect(memory.settings(bot).cursor_seq).toBe(0);expect(memory.recall(bot,'偏好')).toEqual([]);
+    expect(memory.rows(bot)).toHaveLength(0);expect(memory.settings(bot).cursor_seq).toBe(0);expect(await memory.recall(bot,'偏好')).toEqual([]);
   });
   it('does not store incomplete summaries, counts unknown usage, and handles Anthropic cache totals',async()=>{
     const {app,fake,bot}=await fixture();
@@ -249,8 +318,8 @@ describe('Continuous personal assistant and memory',()=>{
   });
   it('checks tool continuations and preserves paired tool calls during compaction',async()=>{
     const {app,fake,bot}=await fixture();
-    const note=app.runtime.memory.write(bot,{title:'合成资料',content:'资料'.repeat(9500)});
-    const first=app.agents.send(bot,'保留初始约束。'+'旧材料'.repeat(3000),'tool-setup').taskId;
+    const note=app.runtime.memory.write(bot,{title:'合成资料',content:'资料'.repeat(10000)});
+    const first=app.agents.send(bot,'保留初始约束。'+'旧材料'.repeat(5000),'tool-setup').taskId;
     await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',first)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);
     fake.scripts.push({action:'memory.read',args:{documentId:note.documentId}},'已读取资料');
     const task=app.agents.send(bot,'读取资料，遵守初始约束','tool-followup').taskId;
@@ -262,12 +331,228 @@ describe('Continuous personal assistant and memory',()=>{
     expect(messages.slice(0,resultIndex).some(row=>row.tool_calls?.some(call=>call.id===messages[resultIndex].tool_call_id))).toBe(true);
     expect(app.store.all('SELECT * FROM context_checkpoints').length).toBeGreaterThan(0);
   },60000);
+  const turn=async(app:Fixture['app'],bot:string,text:string,key:string,status='succeeded')=>{
+    const task=app.agents.send(bot,text,key).taskId;
+    await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status===status,app);
+    // A failed task is reported by wait() as an error while its worker is still closing.
+    while(app.runtime.workers.size)await new Promise(resolve=>setTimeout(resolve,20));
+    return task;
+  };
+  const streamed=(fake:Fixture['fake'])=>fake.requests.filter(row=>row.stream);
+  it('stores the projection as rows and calibrates the model from each completed receipt',async()=>{
+    const {app,fake,bot}=await fixture();
+    fake.setUsageScale(.5);
+    await turn(app,bot,'第一轮：只讨论。','calibrate-one');await turn(app,bot,'第二轮：继续。','calibrate-two');
+    const runtime=String(app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!.id),projection=app.runtime.projection;
+    const stored=projection.load(runtime)!;
+    expect(stored[0].type).toBe('session');
+    expect(projection.db.prepare('SELECT seq FROM projection_entries WHERE runtime_id=? ORDER BY seq').all(runtime).map(row=>row.seq)).toEqual(stored.map((_,index)=>index));
+    expect(projection.db.prepare('SELECT COUNT(*) n FROM projections').get()?.n).toBe(0);
+    const config=app.store.modelConfig(),row=app.store.get('SELECT * FROM model_calibration')!;
+    expect(row).toMatchObject({provider:config.provider,endpoint:config.endpoint,model:config.model});
+    expect(Number(row.samples)).toBe(streamed(fake).length);expect(Number(row.ratio)).toBeGreaterThan(.45);expect(Number(row.ratio)).toBeLessThan(.55);
+    expect(app.store.calibration.ratio(config)).toBe(Number(row.ratio));
+    // The receipt's input is what the provider reported, i.e. half the offline estimate of the request.
+    const last=streamed(fake).at(-1)!,input=Number(app.store.get('SELECT input_tokens FROM model_invocations ORDER BY created_at DESC LIMIT 1')!.input_tokens);
+    expect(input).toBeGreaterThan(tokens(last)*.45);expect(input).toBeLessThan(tokens(last)*.55);
+  },60000);
+  // Three 10240-character turns put the raw estimate just below H and 90% of the 64,000-token window
+  // (the count behind that line also carries the prompt, whose memory section is a few hundred tokens longer than it was; the broker description and prompt grew again with user topics, hence 10240 characters.)
+  const ballast='合成资料'.repeat(2560);
+  it('starts reduction on the calibrated count: a low ratio does not delay it past the raw 90% net, a high one brings it forward',async()=>{
+    // H of the 64,000-token window is 57,856. Without a ratio three of these turns (~54,000 raw) still fit.
+    const control=await fixture();
+    for(const n of [0,1,2])await turn(control.app,control.bot,`第${n}轮 ${ballast}`,'control-'+n);
+    expect(control.app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
+    // Receipts that read 30% above the estimate: the calibrated count reaches H first.
+    const high=await fixture();
+    high.fake.setUsageScale(1.3);high.app.store.calibration.record(high.app.store.modelConfig(),2600,2000);
+    for(const n of [0,1,2])await turn(high.app,high.bot,`第${n}轮 ${ballast}`,'high-'+n);
+    expect(high.app.store.all('SELECT * FROM context_checkpoints').length).toBeGreaterThan(0);
+    expect(tokens(streamed(high.fake).at(-1))).toBeLessThan(64000-256);
+    const {app,fake,bot}=await fixture();
+    fake.setUsageScale(.5);app.store.calibration.record(app.store.modelConfig(),1000,2000);
+    for(const n of [0,1,2])await turn(app,bot,`第${n}轮 ${ballast}`,'calibrated-'+n);
+    const last=streamed(fake).at(-1)!,raw=tokens(last);
+    expect(raw).toBeGreaterThan(48000);expect(raw).toBeLessThan(64000*.9);
+    expect(app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
+    expect(app.runtime.projection.load(String(app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!.id))!.some(entry=>entry.type==='compaction'||entry.type==='context_edit')).toBe(false);
+    expect(JSON.stringify(last)).toContain('第0轮');
+    expect(fake.requests.every(row=>row.stream)).toBe(true);
+    // The raw estimate reaches 90% of the window: reduction starts however low the ratio reads.
+    await turn(app,bot,`第3轮 ${ballast}`,'calibrated-3');
+    expect(app.store.all('SELECT * FROM context_checkpoints').length).toBeGreaterThan(0);
+    expect(tokens(streamed(fake).at(-1))).toBeLessThan(64000-256);
+  },180000);
+  it('keeps the raw estimate for capacity: a request that reduction cannot fit is refused however the ratio reads',async()=>{
+    const {app,fake,bot}=await fixture();
+    app.store.saveConfig({provider:'openai',endpoint:fake.origin+'/v1',model:'fixture-chat',contextWindow:40000,maxOutputTokens:4096});
+    fake.setUsageScale(.3);app.store.calibration.record(app.store.modelConfig(),1000,10000);
+    expect(app.store.calibration.ratio(app.store.modelConfig())).toBe(.3);
+    // About 55,000 raw tokens in one input: 16,500 calibrated, far below the 32,000 trigger, but above the 40,000 window.
+    const task=await turn(app,bot,'合成资料'.repeat(8000),'oversize','failed');
+    expect(app.store.get('SELECT result_summary FROM tasks WHERE id=?',task)?.result_summary).toContain('仍超过输入预算');
+    expect(fake.requests).toHaveLength(0);expect(app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
+  },60000);
+  type Wire={role:string;content:unknown;tool_calls?:unknown};
+  const configure=(app:Fixture['app'],fake:Fixture['fake'],extra:Record<string,unknown>)=>app.store.saveConfig({provider:'openai',endpoint:fake.origin+'/v1',model:'fixture-chat',maxOutputTokens:4096,...extra});
+  const bigDoc=(app:Fixture['app'],bot:string,label:string)=>app.runtime.memory.write(bot,{title:label,content:`${label} `+'资料'.repeat(1500)});
+  const runtimeOf=(app:Fixture['app'],bot:string)=>String(app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!.id);
+  const withoutSystem=(request:Record<string,unknown>)=>JSON.stringify((request.messages as Wire[]).filter(message=>message.role!=='system'&&message.role!=='developer'));
+  // The prefix of every request, minus the per-request volatile block, must be a byte-identical prefix of the next request.
+  const expectStablePrefixes=(fake:Fixture['fake'])=>{
+    const requests=fake.requests.filter(row=>row.stream).map(row=>(row.messages as Wire[]).filter(message=>!(message.role==='user'&&typeof message.content==='string'&&message.content.startsWith('<system-reminder>'))));
+    expect(requests.length).toBeGreaterThan(2);
+    for(const [index,messages] of requests.slice(1).entries())expect(JSON.stringify(messages.slice(0,requests[index].length))).toBe(JSON.stringify(requests[index]));
+  };
+  it('never reduces between the soft threshold and the input budget: the request goes out as it is, however far above the threshold',async()=>{
+    const {app,fake,bot}=await fixture();
+    // S = 12,000 tokens; the input budget H is 160,000. Three results of ~13,500 tokens each put the context far above S.
+    configure(app,fake,{contextWindow:200000,contextBudget:12000});
+    const notes=['BUDGET-RESULT-0','BUDGET-RESULT-1','BUDGET-RESULT-2'].map(label=>bigDoc(app,bot,label));
+    fake.scripts.push(...notes.flatMap((note,index)=>[{action:'memory.read',args:{documentId:note.documentId}},`第${index}轮完成`]));
+    for(const [index] of notes.entries())await turn(app,bot,`读取资料 ${index}`,`budget-${index}`);
+    await turn(app,bot,'继续','budget-more');
+    const last=withoutSystem(streamed(fake).at(-1)!);
+    for(const label of ['BUDGET-RESULT-0','BUDGET-RESULT-1','BUDGET-RESULT-2'])expect(last).toContain(label);
+    expect(tokens(streamed(fake).at(-1))).toBeGreaterThan(12000);
+    // No summarizer call, no checkpoint, no edit: the history the cache holds is never touched.
+    expect(fake.requests.every(row=>row.stream)).toBe(true);
+    expect(app.store.all('SELECT * FROM context_checkpoints')).toHaveLength(0);
+    expect(app.runtime.projection.load(runtimeOf(app,bot))!.some(entry=>entry.type==='compaction'||entry.type==='context_edit')).toBe(false);
+    expectStablePrefixes(fake);
+  },120000);
+  it('resolves the soft threshold: default min(256k, 80% of the window, H − 2k), an explicit value wins within that cap',async()=>{
+    const {app,fake}=await fixture();
+    configure(app,fake,{contextWindow:400000});
+    expect(app.store.modelConfig().contextBudget).toBe(256000);
+    configure(app,fake,{contextWindow:64000});
+    expect(app.store.modelConfig().contextBudget).toBe(51200);
+    configure(app,fake,{contextWindow:400000,contextBudget:200000});
+    expect(app.store.modelConfig().contextBudget).toBe(200000);
+    configure(app,fake,{contextWindow:400000,contextBudget:900000});
+    expect(app.store.modelConfig().contextBudget).toBe(320000);
+    configure(app,fake,{contextWindow:1000000,contextBudget:null});
+    expect(app.store.modelConfig().contextBudget).toBe(256000);
+  });
+  it('reduces only a request that would not fit: it grows unreduced up to the input budget, then drops to the target, and the next turn adds no reduction',async()=>{
+    const {app,fake,bot}=await fixture();
+    // H = 53,856, S = 30,000, T = 12,000: requests grow through S unreduced; only the one that would not fit is reduced.
+    configure(app,fake,{contextWindow:60000,contextBudget:30000});
+    expect(app.store.modelConfig().contextBudget).toBe(30000);
+    const notes=Array.from({length:10},(_,i)=>bigDoc(app,bot,`STAGE-${i}`));
+    fake.scripts.push(...notes.map(note=>({action:'memory.read',args:{documentId:note.documentId}})),'完成');
+    await turn(app,bot,'逐个读取资料','stage-one');
+    const sizes=streamed(fake).map(row=>tokens(row));
+    const first=sizes.findIndex((_,index)=>index>0&&sizes[index]<sizes[index-1]);
+    // Requests grow with each result, crossing the soft threshold without any reduction; only the one that would not fit is reduced.
+    expect(first).toBeGreaterThan(1);
+    expect(sizes.slice(0,first).some(size=>size>30000)).toBe(true);
+    for(const size of sizes.slice(0,first))expect(size).toBeLessThan(53856+2000);
+    // The reduction goes down to the target (40% of S), not merely below the limit; the newest result is never summarized.
+    expect(sizes[first]).toBeLessThan(sizes[first-1]-8000);
+    const edits=app.runtime.projection.load(runtimeOf(app,bot))!.filter(entry=>entry.type==='context_edit');
+    expect(edits.length).toBeGreaterThanOrEqual(2);
+    const after=app.store.all('SELECT * FROM context_checkpoints').length;
+    await turn(app,bot,'继续','stage-two');
+    expect(app.store.all('SELECT * FROM context_checkpoints').length).toBe(after);
+    expect(tokens(streamed(fake).at(-1))).toBeLessThan(53856);
+  },120000);
+  it('never digests tool results of older turns while the context is at or below the soft threshold',async()=>{
+    const {app,fake,bot}=await fixture();
+    const one=bigDoc(app,bot,'DIGEST-ONE'),two=bigDoc(app,bot,'DIGEST-TWO');
+    fake.scripts.push({action:'agent.directory',args:{}},{action:'memory.read',args:{documentId:one.documentId}},'第一轮完成',{action:'memory.read',args:{documentId:two.documentId}},'第二轮完成');
+    for(const [index,text] of ['第一轮：读取资料','第二轮：读取另一份资料','第三轮：只讨论','第四轮：继续','第五轮：继续'].entries())await turn(app,bot,text,'digest-'+index);
+    // Turn one's large result is two turns old, yet nothing is summarized: the context is far below S.
+    expect(fake.requests.every(row=>row.stream)).toBe(true);
+    expect(app.runtime.projection.load(runtimeOf(app,bot))!.some(entry=>entry.type==='context_edit')).toBe(false);
+    const request=withoutSystem(streamed(fake).at(-1)!);
+    expect(request).toContain('DIGEST-ONE');expect(request).toContain('DIGEST-TWO');expect(request).not.toContain('工具结果摘要');
+    expectStablePrefixes(fake);
+  },120000);
+  it('keeps images of older turns complete while the context is at or below the soft threshold',async()=>{
+    const {app,fake,bot}=await fixture();
+    const files=new ChatFiles(app.store),image=files.upload({botId:bot,name:'older.png',data:Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),Buffer.alloc(2000,65)]).toString('base64')},app.store.session);
+    fake.scripts.push({action:'attachment.read',args:{attachmentId:image.id}},'已看图');
+    const first=app.agents.send(bot,`看这张图\n![合成图片](/api/attachments/${image.id})`,'image-one').taskId;files.bind([image.id],bot,'image-one');
+    await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',first)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);
+    await turn(app,bot,'第二轮：继续','image-two');
+    await turn(app,bot,'第三轮：继续','image-three');
+    // Two turns later the image is still sent as it was: replacing it would change the cached history for nothing.
+    const last=JSON.stringify(streamed(fake).at(-1));
+    expect(last).toContain('data:image/png;base64,');expect(last).not.toContain('[图片 attachment:');
+    expect(fake.requests.every(row=>row.stream)).toBe(true);
+    expect(app.runtime.projection.load(runtimeOf(app,bot))!.some(entry=>entry.type==='context_edit')).toBe(false);
+    expectStablePrefixes(fake);
+  },90000);
+  it('keeps the stable system message byte-identical when a peer starts or finishes a task and shows availability in the volatile block',async()=>{
+    const {app,bot}=await fixture();
+    const peer=app.store.createBot('同伴助手');
+    const task=await turn(app,bot,'第一轮：只讨论。','peer-one');
+    const before=app.runtime.promptParts(task);
+    app.agents.send(peer,'同伴开始工作','peer-busy');
+    const during=app.runtime.promptParts(task);
+    expect(during.systemPrompt).toBe(before.systemPrompt);
+    expect(before.systemPrompt).toContain(peer);expect(before.systemPrompt).not.toContain('availability');expect(before.systemPrompt).not.toContain('directory_version');
+    expect(before.volatilePrompt).toContain(`{"id":"${peer}","availability":"ready"}`);
+    expect(during.volatilePrompt).toContain(`{"id":"${peer}","availability":"busy"}`);
+    await wait(()=>!app.runtime.workers.size&&!app.store.get('SELECT id FROM tasks WHERE bot_id=? AND ended_at IS NULL',peer),app);
+    expect(app.runtime.promptParts(task).systemPrompt).toBe(before.systemPrompt);
+  },60000);
+  const isVolatile=(message:Wire)=>message.role==='user'&&typeof message.content==='string'&&message.content.startsWith('<system-reminder>');
+  const answerRequests=(fake:Fixture['fake'])=>fake.requests.filter(row=>row.stream).map(row=>row.messages as Wire[]);
+  const systemEntries=(app:Fixture['app'],bot:string,prompt=true)=>app.runtime.projection.load(String(app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!.id))!.filter(entry=>entry.type==='message'&&entry.message.role==='system'&&!!systemPromptText(entry)===prompt);
+  it('keeps every request a byte-identical prefix of the next one; the volatile block is outside the system message and the projection',async()=>{
+    const {app,fake,bot}=await fixture();
+    fake.scripts.push({action:'agent.directory',args:{}},'第一轮完成','第二轮完成');
+    const first=app.agents.send(bot,'第一轮：只讨论。','prefix-one').taskId;
+    await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',first)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    const second=app.agents.send(bot,'第二轮：继续。','prefix-two').taskId;
+    await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',second)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);
+    const requests=answerRequests(fake);expect(requests).toHaveLength(3);
+    const volatile=requests.map(messages=>messages.filter(isVolatile));
+    for(const [index,messages] of requests.entries()){
+      // One system message holding only the stable prompt, one volatile block.
+      const systems=messages.filter(m=>m.role==='system'||m.role==='developer');
+      expect(systems).toHaveLength(1);expect(messages[0]).toBe(systems[0]);
+      expect(String(systems[0].content)).toContain('长期记忆（只包含');expect(String(systems[0].content)).not.toContain('<system-reminder>');expect(String(systems[0].content)).not.toContain('当前 Core 时间');
+      expect(volatile[index]).toHaveLength(1);expect(String(volatile[index][0].content)).toContain('当前 Core 时间');expect(String(volatile[index][0].content)).toContain('设备实时目录');
+    }
+    expect(requests[0].at(-2)).toBe(volatile[0][0]);expect(requests[0].at(-1)).toMatchObject({role:'user'});
+    // Tool continuation: after the tool result; user turn: right before the new input.
+    expect(requests[1].at(-1)).toBe(volatile[1][0]);expect(requests[1].at(-2)).toMatchObject({role:'tool'});
+    expect(requests[2].at(-2)).toBe(volatile[2][0]);expect(JSON.stringify(requests[2].at(-1))).toContain('第二轮：继续。');
+    // Volatile text changes per request; everything else is a byte-identical prefix of the next request.
+    expect(new Set(volatile.map(([m])=>m.content)).size).toBe(3);
+    const stable=requests.map(messages=>messages.filter(m=>!isVolatile(m)));
+    for(const [index,messages] of stable.slice(1).entries())expect(JSON.stringify(messages.slice(0,stable[index].length))).toBe(JSON.stringify(stable[index]));
+    expect(stable[2].length).toBeGreaterThan(stable[1].length);
+    // The projection never stores the volatile block and keeps one system entry.
+    const stored=app.runtime.projection.load(String(app.store.get('SELECT id FROM runtime_sessions WHERE bot_id=?',bot)!.id))!;
+    expect(JSON.stringify(stored)).not.toContain('当前 Core 时间');expect(systemEntries(app,bot)).toHaveLength(1);
+  },60000);
+  it('appends a new system entry only when the stable prompt changes and drops stale ones on the next load',async()=>{
+    const {app,fake,bot}=await fixture();
+    const turn=async(text:string)=>{const task=app.agents.send(bot,text,'system-'+text).taskId;await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status==='succeeded',app);await wait(()=>!app.runtime.workers.size,app);};
+    await turn('一');await turn('二');
+    const unchanged=systemEntries(app,bot);expect(unchanged).toHaveLength(1);
+    app.runtime.memory.core.update(bot,{patch:{about:{add:['新账本记忆：让稳定前缀变化']}},expectedVersion:0});
+    await turn('三');
+    const changed=systemEntries(app,bot);expect(changed).toHaveLength(2);
+    expect(String((changed[1] as {message:{content:string}}).message.content)).toContain('新账本记忆');
+    await turn('四');
+    expect(systemEntries(app,bot)).toHaveLength(1);
+    // The SDK's own tool declarations do not grow with each run either.
+    expect(systemEntries(app,bot,false).length).toBeLessThanOrEqual(2);
+    expect(answerRequests(fake).every(messages=>messages.filter(m=>m.role==='system').length===1)).toBe(true);
+  },60000);
   it('keeps a scoped working note even when long-term memory is off',async()=>{
     const {app,fake,bot}=await fixture();
     fake.scripts.push({action:'memory.write',args:{scope:'context',title:'工作笔记',content:'当前只讨论，不部署。下一步等用户确认。',expectedVersion:0}},'已记录');
     const task=app.agents.send(bot,'记下当前工作的约束','working-note').taskId;
     await wait(()=>app.store.get('SELECT status FROM tasks WHERE id=?',task)?.status==='succeeded',app);
-    expect(app.store.get('SELECT version FROM assistant_working_notes WHERE bot_id=?',bot)?.version).toBe(1);
+    expect(app.store.get('SELECT version FROM conversation_working_notes WHERE bot_id=?',bot)?.version).toBe(1);
     expect(app.runtime.systemPrompt(task)).toContain('下一步等用户确认');
     expect(app.runtime.memory.personal.enabled(bot)).toBe(false);
     expect(app.store.all('SELECT * FROM assistant_memories')).toHaveLength(0);
@@ -282,19 +567,148 @@ describe('Continuous personal assistant and memory',()=>{
     expect(JSON.stringify(fake.requests)).not.toContain('关闭期间的记录');
     expect(app.agents.search(bot,'关闭期间')).toHaveLength(1);
   });
-  it('updates observations with provenance and stops recalling stale understanding after a correction',async()=>{
+  it('updates a topic with provenance when a correction arrives, and recalls the corrected text',async()=>{
     const {app,bot,fake}=await fixture(),memory=app.runtime.memory.personal;
     memory.save(bot,{version:0,enabled:true,dailyBudget:100000});app.agents.publish(bot,'user','message','这个项目使用方案甲','old');await memory.flush();
-    const observation=memory.rows(bot).find(row=>row.kind==='observation')!;
+    const topic=memory.rows(bot).find(row=>row.kind==='topic')!;
     fake.setOverride(body=>{
       const messages=body.messages as Array<{content:string}>;
-      if(!messages[0].content.includes('合并同一事项'))return undefined;
+      if(!messages[0].content.includes('整理主题条目'))return undefined;
       const input=JSON.parse(messages.at(-1)!.content);
-      return {choices:[{message:{content:JSON.stringify({items:[{id:observation.id,title:'当前项目方案',content:'用户已将方案甲改为方案乙',sources:input.facts.flatMap((row:{refs_json:string})=>JSON.parse(row.refs_json).map((ref:{id:string})=>ref.id))}]})},finish_reason:'stop'}],usage:{prompt_tokens:200,completion_tokens:100}};
+      expect(input.topic.id).toBe(topic.id);
+      return {choices:[{message:{content:JSON.stringify({topics:[{id:topic.id,title:'当前项目方案',summary:'项目方案已改为乙',body:'用户已将方案甲改为方案乙',facts:input.facts.map((fact:{id:string})=>fact.id)}]})},finish_reason:'stop'}],usage:{prompt_tokens:200,completion_tokens:100}};
     });
-    app.agents.publish(bot,'user','message','更正：这个项目改为方案乙','new');app.store.run('UPDATE assistant_memory_settings SET next_attempt=0 WHERE bot_id=?',bot);await memory.flush();
-    expect(app.store.get('SELECT version FROM assistant_memories WHERE id=?',observation.id)?.version).toBe(2);
-    expect(memory.rows(bot).filter(row=>row.kind==='understanding')).toHaveLength(0);
-    expect(JSON.stringify(memory.recall(bot,'项目方案'))).toContain('改为方案乙');
+    app.agents.publish(bot,'user','message','更正：这个项目使用方案乙','new');app.store.run('UPDATE assistant_memory_settings SET next_attempt=0 WHERE bot_id=?',bot);await memory.flush();
+    expect(app.store.get('SELECT version FROM assistant_memories WHERE id=?',topic.id)?.version).toBe(2);
+    expect(memory.rows(bot).filter(row=>row.kind==='topic')).toHaveLength(1);
+    // Both facts are evidence of the one topic, and its sources are theirs.
+    expect(app.store.all('SELECT memory_id FROM assistant_topic_evidence WHERE topic_id=?',topic.id)).toHaveLength(2);
+    expect(JSON.parse(String(app.store.get('SELECT refs_json FROM assistant_memories WHERE id=?',topic.id)!.refs_json))).toHaveLength(2);
+    expect(JSON.stringify(await memory.recall(bot,'项目方案'))).toContain('改为方案乙');
+  });
+  describe('background step backoff and budget cap',()=>{
+    const MIN=60000,HOUR=60*MIN;
+    const marker={retain:'从新增原文提取',consolidate:'整理主题条目',migrate:'筛选旧记忆'};
+    const instructionOf=(body:Record<string,unknown>)=>String((body.messages as Array<{role:string;content:string}>).find(message=>message.role==='system')?.content??'');
+    const calls=(fake:Fixture['fake'],step:keyof typeof marker)=>fake.requests.filter(request=>!request.stream&&instructionOf(request).includes(marker[step])).length;
+    const state=(app:Fixture['app'],bot:string,step:string)=>app.store.get('SELECT * FROM assistant_memory_steps WHERE bot_id=? AND step=?',bot,step);
+    const usage={prompt_tokens:400,completion_tokens:80};
+    const invalidJson={choices:[{message:{content:'这不是 JSON'},finish_reason:'stop'}],usage};
+    const truncated={choices:[{message:{content:'{"topics":['},finish_reason:'length'}],usage};
+    // Time is the only thing faked, so the local model server and its sockets behave normally.
+    const clock=()=>{
+      const start=new Date();start.setDate(start.getDate()+1);start.setHours(1,0,0,0);
+      vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(start);
+      return {start:start.getTime(),advance:(ms:number)=>vi.setSystemTime(Date.now()+ms)};
+    };
+    it.each([['invalid JSON',invalidJson],['a truncated answer',truncated]])('retries a failing topic merge after 10 min, 1 h, then 6 h (%s), keeps retaining meanwhile, and a success resets it',async(_name,bad)=>{
+      const {app,fake,bot}=await fixture(),memory=app.runtime.memory.personal,time=clock();
+      try {
+        let failing=true;fake.setOverride(body=>failing&&instructionOf(body).includes(marker.consolidate)?bad:undefined);
+        memory.save(bot,{version:0,enabled:true,model:'fixture-memory',dailyBudget:100000});
+        app.agents.publish(bot,'user','message','这个项目先讨论完整方案，再实现','m1');
+        await memory.flush();
+        expect(calls(fake,'consolidate')).toBe(1);
+        expect(state(app,bot,'consolidate')).toMatchObject({failures:1,next_at:time.start+10*MIN});
+        expect(memory.settings(bot).last_error).toContain('consolidate');
+        // Retain is healthy, so the pass stays on its 30 s cadence.
+        expect(memory.settings(bot).next_attempt).toBe(time.start+30000);
+        // The old loop retried every minute; now nothing is called for 9 minutes while new facts are still retained.
+        for(let minute=1;minute<=9;minute++){
+          time.advance(MIN);
+          if(minute===2)app.agents.publish(bot,'user','message','另外约定每周五汇报','m2');
+          await memory.flush();
+        }
+        expect(calls(fake,'consolidate')).toBe(1);
+        expect(calls(fake,'retain')).toBe(2);
+        expect(memory.rows(bot).filter(row=>row.kind==='fact')).toHaveLength(2);expect(memory.rows(bot).filter(row=>row.kind==='topic')).toHaveLength(0);
+        time.advance(MIN);await memory.flush();
+        // Both facts are pending and unrelated: one call each, the first of which fails.
+        expect(calls(fake,'consolidate')).toBe(2);
+        expect(state(app,bot,'consolidate')).toMatchObject({failures:2,next_at:time.start+10*MIN+HOUR});
+        // At most two attempts in the first hour.
+        for(let n=0;n<10;n++){time.advance(5*MIN);await memory.flush();}
+        expect(Date.now()-time.start).toBe(60*MIN);
+        expect(calls(fake,'consolidate')).toBe(2);
+        time.advance(10*MIN);await memory.flush();
+        expect(calls(fake,'consolidate')).toBe(3);
+        expect(state(app,bot,'consolidate')).toMatchObject({failures:3,next_at:Date.now()+6*HOUR});
+        const third=Date.now();
+        for(let n=0;n<11;n++){time.advance(30*MIN);await memory.flush();}
+        expect(Date.now()-third).toBe(5.5*HOUR);
+        expect(calls(fake,'consolidate')).toBe(3);
+        expect(memory.rows(bot).filter(row=>row.kind==='topic')).toHaveLength(0);
+        // A success writes the topics and forgets the failures.
+        failing=false;time.advance(30*MIN);await memory.flush();
+        expect(calls(fake,'consolidate')).toBe(5);
+        expect(state(app,bot,'consolidate')).toBeUndefined();
+        expect(memory.rows(bot).filter(row=>row.kind==='topic')).toHaveLength(2);
+        expect(memory.settings(bot).last_error).toBeNull();
+        // The next failure starts again at 10 minutes.
+        app.agents.publish(bot,'user','message','新的约定：先评审再合并','m3');
+        failing=true;time.advance(31*MIN);await memory.flush();
+        expect(calls(fake,'consolidate')).toBe(6);
+        expect(state(app,bot,'consolidate')).toMatchObject({failures:1,next_at:Date.now()+10*MIN});
+      } finally {vi.useRealTimers();}
+    },60000);
+    it('backs off a failing topic merge and a failing retain independently, so the other keeps working',async()=>{
+      const {app,fake,bot}=await fixture(),memory=app.runtime.memory.personal,time=clock();
+      try {
+        let mode:'consolidate'|'retain'='consolidate';
+        fake.setOverride(body=>instructionOf(body).includes(marker[mode])?invalidJson:undefined);
+        memory.save(bot,{version:0,enabled:true,model:'fixture-memory',dailyBudget:100000});
+        app.agents.publish(bot,'user','message','这个项目先讨论完整方案，再实现','m1');
+        await memory.flush();
+        expect(calls(fake,'consolidate')).toBe(1);
+        expect(state(app,bot,'consolidate')).toMatchObject({failures:1,next_at:time.start+10*MIN});
+        expect(memory.rows(bot).filter(row=>row.kind==='fact')).toHaveLength(1);
+        // Consolidate waits; retain keeps taking new messages.
+        app.agents.publish(bot,'user','message','另外约定每周五汇报','m2');
+        time.advance(MIN);await memory.flush();
+        expect(calls(fake,'retain')).toBe(2);expect(calls(fake,'consolidate')).toBe(1);
+        // Retain now fails, but consolidate is due again and still runs on the facts it already has (two unrelated ones: two calls).
+        mode='retain';app.agents.publish(bot,'user','message','第三条约定','m3');
+        time.advance(10*MIN);await memory.flush();
+        expect(calls(fake,'retain')).toBe(3);expect(calls(fake,'consolidate')).toBe(3);
+        expect(state(app,bot,'retain')).toMatchObject({failures:1,next_at:Date.now()+10*MIN});
+        expect(state(app,bot,'consolidate')).toBeUndefined();
+        expect(memory.rows(bot).filter(row=>row.kind==='topic')).toHaveLength(2);
+        expect(memory.settings(bot).last_error).toContain('retain');
+      } finally {vi.useRealTimers();}
+    },60000);
+    it('is next due when the earliest backoff ends once every step is waiting',async()=>{
+      const {app,fake,bot}=await fixture(),memory=app.runtime.memory.personal;
+      memory.save(bot,{version:0,enabled:true,dailyBudget:100000});
+      const at=Date.now();
+      for(const [step,wait] of [['retain',2*HOUR],['consolidate',HOUR],['migrate',6*HOUR]] as const)app.store.run('INSERT INTO assistant_memory_steps VALUES(?,?,?,?,?,?)',bot,step,2,at+wait,step+': 失败',at);
+      app.agents.publish(bot,'user','message','等待中的消息','m1');
+      await memory.flush();
+      expect(fake.requests).toHaveLength(0);
+      expect(memory.settings(bot).next_attempt).toBe(at+HOUR);
+      expect(memory.settings(bot).last_error).not.toBeNull();
+      // Changed settings are a fresh start.
+      memory.save(bot,{version:1,enabled:true,dailyBudget:100000});
+      expect(app.store.all('SELECT * FROM assistant_memory_steps')).toHaveLength(0);
+    });
+    it('enforces the daily memory budget at 500,000 tokens whatever is saved',async()=>{
+      expect([effectiveDailyBudget(10_000_000),effectiveDailyBudget(0),effectiveDailyBudget(100)]).toEqual([500_000,500_000,100]);
+      const {app,fake,bot}=await fixture(),memory=app.runtime.memory.personal,time=clock();
+      try {
+        memory.save(bot,{version:0,enabled:true,model:'fixture-memory',dailyBudget:10_000_000});
+        expect(memory.settings(bot).daily_budget).toBe(10_000_000);
+        expect(memory.monitor(bot).settings.effective_daily_budget).toBe(500_000);
+        app.store.run('INSERT INTO assistant_usage(id,bot_id,purpose,model,status,reserved_tokens,input_tokens,output_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?)','used',bot,'consolidate','fixture','succeeded',2000,400_000,99_000,Date.now());
+        app.agents.publish(bot,'user','message','记住项目约束','m1');
+        await memory.flush();
+        expect(fake.requests).toHaveLength(0);
+        expect(memory.settings(bot).last_error).toContain('预算');
+        // Running out of the day's budget waits, but is not counted as the step's failure.
+        expect(state(app,bot,'retain')).toMatchObject({failures:0,next_at:time.start+10*MIN});
+        // Below the cap the same setting works.
+        app.store.run('DELETE FROM assistant_usage');
+        time.advance(11*MIN);await memory.flush();
+        expect(calls(fake,'retain')).toBe(1);
+      } finally {vi.useRealTimers();}
+    });
   });
 });
