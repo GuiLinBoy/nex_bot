@@ -63,7 +63,6 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if !tasks.isEmpty { statusBar }
             if let error = errorText {
                 Text(error).font(.footnote).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -72,54 +71,49 @@ struct ComposerView: View {
             if menu == .add { addMenu.transition(.opacity) }
             if menu == .permissions { permissionMenu.frame(maxWidth: .infinity, alignment: .leading).transition(.opacity) }
             if !conversation.attachments.isEmpty { attachmentChips }
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .bottom, spacing: 4) {
+                Button { toggle(.add) } label: {
+                    Image(systemName: "plus").font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(menu == .add ? Theme.foreground : Theme.muted)
+                        .frame(width: 36, height: 36)
+                        .background(menu == .add ? Theme.wash : .clear, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(conversation.isSending || conversation.isUploadingAttachments)
+                .accessibilityLabel("添加文件或指令")
                 TextField("给 \(botName) 发消息…", text: $conversation.draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .padding(.horizontal, 6).padding(.top, 6)
+                    .lineLimit(1...6)
+                    .padding(.vertical, 8)
                     .accessibilityLabel("发送给 Agent 的消息")
                     .onChange(of: conversation.draft) { showMentionsDismissed = false; menu = nil }
-                HStack(spacing: 8) {
-                    Button { toggle(.add) } label: {
-                        Image(systemName: "plus").font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(menu == .add ? Theme.foreground : Theme.muted)
-                            .frame(width: 34, height: 34)
-                            .background(menu == .add ? Theme.secondary : .clear, in: Circle())
+                // While the agent works and nothing is typed, the send key stops it (web composer).
+                if showStop {
+                    Button { Task { await stopAll() } } label: {
+                        Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold))
+                            .frame(width: 36, height: 36)
+                            .foregroundStyle(Theme.primaryForeground)
+                            .background(Theme.primary, in: Circle())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(conversation.isSending || conversation.isUploadingAttachments)
-                    .accessibilityLabel("添加文件或指令")
-                    Spacer(minLength: 0)
-                    // While the agent works and nothing is typed, the send key stops it (web composer).
-                    if showStop {
-                        Button { Task { await stopAll() } } label: {
-                            Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold))
-                                .frame(width: 34, height: 34)
-                                .foregroundStyle(Theme.primaryForeground)
-                                .background(Theme.primary, in: Circle())
+                    .disabled(stopping || allCancelling || workspace.connection == .resyncing)
+                    .accessibilityLabel("停止任务")
+                } else {
+                    Button { Task { await send() } } label: {
+                        Group {
+                            if conversation.isSending { ProgressView() }
+                            else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) }
                         }
-                        .disabled(stopping || allCancelling || workspace.connection == .resyncing)
-                        .accessibilityLabel("停止任务")
-                    } else {
-                        Button { Task { await send() } } label: {
-                            Group {
-                                if conversation.isSending { ProgressView() }
-                                else { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)) }
-                            }
-                            .frame(width: 34, height: 34)
-                            .foregroundStyle(canSend ? Theme.primaryForeground : Theme.muted)
-                            .background(canSend ? Theme.primary : Theme.secondary, in: Circle())
-                        }
-                        .disabled(!canSend)
-                        .accessibilityLabel("发送消息")
+                        .frame(width: 36, height: 36)
+                        .foregroundStyle(canSend ? Theme.primaryForeground : Theme.muted)
+                        .background(canSend ? Theme.primary : Theme.wash, in: Circle())
                     }
+                    .disabled(!canSend)
+                    .accessibilityLabel("发送消息")
                 }
             }
-            .padding(.horizontal, 6).padding(.bottom, 6)
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Theme.border))
+            .padding(.leading, 6).padding(.trailing, 5).padding(.vertical, 5)
+            .glass(RoundedRectangle(cornerRadius: 25, style: .continuous), strong: true)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Theme.background)
         .animation(.easeOut(duration: 0.12), value: menu)
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { Task { await addFiles(urls) } }
@@ -157,15 +151,6 @@ struct ComposerView: View {
 
     // MARK: Parts
 
-    private var statusBar: some View {
-        HStack(spacing: 6) {
-            Circle().fill(Theme.success).frame(width: 6, height: 6)
-            Text(tasks.contains { $0.status == "cancelling" } ? "正在停止…" : "Agent 正在工作 · \(tasks[0].phrase)")
-                .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, 6)
-    }
 
     private func quoteBar(_ quote: QuoteDraft) -> some View {
         HStack(spacing: 8) {
@@ -237,6 +222,7 @@ struct ComposerView: View {
             heading("指令")
             menuRow(mode == .full ? "exclamationmark.shield" : "checkmark.shield", "权限", "permission", value: mode.title, disabled: bot == nil) { menu = .permissions }
             menuRow("slider.horizontal.3", "模型", "model", value: chatModel.isEmpty ? (defaultModel.isEmpty ? "未连接模型" : defaultModel) : chatModel, disabled: config == nil || bot == nil) { menu = nil; showModels = true }
+            menuRow("plus.bubble", "新话题", "topic", disabled: conversation.messages.isEmpty || bot == nil) { menu = nil; Task { await startNewTopic() } }
             menuRow("square.and.arrow.down", "导出对话", "export", value: exporting ? "导出中…" : "Markdown", disabled: conversation.messages.isEmpty || exporting) { menu = nil; Task { await export() } }
         }
         .padding(.bottom, 4)
@@ -434,6 +420,11 @@ struct ComposerView: View {
         guard next != mode else { return }
         actionError = nil
         do { try await workspace.setApprovalMode(botID: botID, mode: next) } catch { actionError = coreMessage(error) }
+    }
+
+    private func startNewTopic() async {
+        actionError = nil
+        do { try await workspace.startNewTopic(botID: botID) } catch { actionError = coreMessage(error) }
     }
 
     private func export() async {

@@ -220,7 +220,7 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     f.app.store.run("DELETE FROM schema_migrations WHERE version=7");
     await f.app.close(); f.owned.apps.splice(0, 1);
     const reopened = await createApp({ dir: path.join(f.root, "core"), key: f.key, token: f.token }); f.owned.apps.push(reopened);
-    expect(JSON.parse(String(reopened.store.get("SELECT policy_json FROM bot_policies WHERE bot_id=?", botId)?.policy_json)).tools).toEqual(["agent.directory", "image.models", "image.generate"]);
+    expect(JSON.parse(String(reopened.store.get("SELECT policy_json FROM bot_policies WHERE bot_id=?", botId)?.policy_json)).tools).toEqual(["agent.directory", "image.models", "image.generate", "html.render", "tool.search"]);
   }, 60_000);
   it("runs ordinary computer input automatically and approves dangerous effects only in the executing Agent, returning screenshot images to the vision model", async () => {
     const f = await fixture(), botId = String(f.bots[1].id);
@@ -342,7 +342,7 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     f.fake.scripts.push({ kind: "openai-text", text: "合成你好，到时间了" });
     f.app.routines.tick(Number(row.next_due_at));
     await wait(() => f.app.store.get("SELECT status FROM routine_occurrences")?.status === "succeeded" || f.app.store.get("SELECT status FROM tasks WHERE id=(SELECT task_id FROM routine_occurrences)")?.status === "succeeded");
-    expect(f.app.agents.messages(botId).some((m) => m.content === "合成你好，到时间了")).toBe(true);
+    expect(f.app.agents.messages(botId).some((m) => String(m.content).includes("合成你好，到时间了"))).toBe(true);
     expect(f.app.store.all("SELECT * FROM routine_occurrences")).toHaveLength(1);
   }, 60_000);
   it("issues independent client sessions, preserves them through Core restart, rejects device credentials and revokes one client only", async () => {
@@ -436,6 +436,7 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     expect(f.app.store.all("SELECT * FROM transcript WHERE content LIKE '%雪鹭%' OR content LIKE '%周二%'")).toHaveLength(0);
     expect(f.app.store.all("SELECT payload,result FROM a2a_messages").every((row) => !JSON.stringify(row).includes("雪鹭"))).toBe(true);
     expect(f.app.runtime.projection.db.prepare("SELECT COUNT(*) n FROM projections").get()?.n).toBe(0);
+    expect(f.app.runtime.projection.db.prepare("SELECT COUNT(*) n FROM projection_entries").get()?.n).toBe(0);
     expect(memory.read(peer, String(retained.documentId)).content).toBe("同伴喜欢盆栽");
     expect(() => f.app.store.run("UPDATE conversation_inputs SET content_json='{}' WHERE task_id=?", task)).toThrow("immutable");
     await f.app.close(); f.owned.apps.splice(f.owned.apps.indexOf(f.app), 1);
@@ -462,6 +463,7 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     expect(empty.store.get("SELECT instructions FROM bots WHERE id=?", botId)?.instructions).toBe("");
     expect(JSON.parse(String(empty.store.get("SELECT policy_json FROM bot_policies WHERE bot_id=?", botId)?.policy_json)).tools).toContain("device.exec");
     empty.runtime.memory.write(botId, { title: "独立记忆", content: "沿用稳定身份" });
+    empty.runtime.memory.core.replace("bot", botId, { about: ["沿用稳定身份"], topics: [] }, 0);
     empty.agents.updateProfile({ id: botId, name: "另一个任意名字", instructions: "", version: 1 });
     expect(empty.runtime.memory.prompt(botId)).toContain("沿用稳定身份");
     empty.agents.archive({ id: botId, version: 2 });
@@ -574,7 +576,7 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     f.app.routines.save({ botId, name: "工作汇报", prompt: "整理工作并汇报", scheduleKind: "once", runAt: due, timeZone: "Asia/Shanghai" });
     f.fake.scripts.push({ kind: "openai-text", text: "例行任务主动汇报成功" });
     f.app.routines.tick(due); f.app.routines.tick(due);
-    await wait(() => f.app.agents.messages(botId).some((m) => m.content === "例行任务主动汇报成功"));
+    await wait(() => f.app.agents.messages(botId).some((m) => String(m.content).includes("例行任务主动汇报成功")));
     f.app.routines.tick(due + 1);
     expect(f.app.store.all("SELECT * FROM routine_occurrences")).toHaveLength(1);
     expect(f.app.store.all("SELECT * FROM routine_occurrences")[0].status).toBe("succeeded");
@@ -582,22 +584,27 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     const restored = await createApp({ dir, key: f.key, token: f.token }); f.owned.apps.push(restored);
     restored.routines.tick(due + 2);
     expect(f.fake.requests).toHaveLength(1);
-    expect(restored.agents.messages(botId).filter((m) => m.content === "例行任务主动汇报成功")).toHaveLength(1);
+    expect(restored.agents.messages(botId).filter((m) => String(m.content).includes("例行任务主动汇报成功"))).toHaveLength(1);
   }, 40_000);
-  it("queues routines behind approvals and cancels undispatched occurrences when paused", async () => {
+  it("runs a routine child independently of the owner's approval and cancels only pending schedule work", async () => {
     const f = await fixture(), botId = String(f.bots[0].id);
     f.fake.scripts.push({ kind: "openai-tool", calls: [{ id: "owner-pending", name: "broker", args: JSON.stringify(pendingCleanup(f.app, String(f.bots[0].id))) }] });
     const task = f.app.agents.send(botId, "记住一件事", "pending-owner").taskId;
     await wait(() => !!approval(f.app));
-    const routine = f.app.routines.save({ botId, name: "排队任务", prompt: "不要绕过审批", scheduleKind: "interval", intervalMinutes: 1 });
+    const routine = f.app.routines.save({ botId, name: "排队任务", prompt: "不要绕过审批", scheduleKind: "interval", intervalMinutes: 5 });
     const row = f.app.store.get("SELECT * FROM agent_routines WHERE id=?", routine.id)!;
+    f.fake.scripts.push({ kind: "hang" });
     f.app.routines.tick(Number(row.next_due_at));
-    expect(f.app.store.all("SELECT * FROM tasks WHERE ended_at IS NULL")).toHaveLength(1);
-    expect(f.app.store.get("SELECT status FROM routine_occurrences")?.status).toBe("pending");
+    await wait(() => f.fake.requests.length === 2);
+    expect(f.app.store.all("SELECT * FROM tasks WHERE ended_at IS NULL")).toHaveLength(2);
+    expect(f.app.store.get("SELECT status FROM tasks WHERE id=?", task)?.status).toBe("awaiting_approval");
+    const child = f.app.store.get("SELECT task_id FROM routine_occurrences WHERE routine_id=?", routine.id)!;
+    f.app.routines.tick(Number(row.next_due_at) + 300_000);
+    expect(f.app.store.get("SELECT COUNT(*) n FROM routine_occurrences WHERE status='pending'")?.n).toBe(1);
     f.app.routines.toggle(routine.id, Number(row.version), false);
-    expect(f.app.store.get("SELECT status FROM routine_occurrences")?.status).toBe("cancelled");
-    expect(f.fake.requests).toHaveLength(1);
-    f.app.runtime.cancel(task);
+    expect(f.app.store.get("SELECT COUNT(*) n FROM routine_occurrences WHERE status='cancelled'")?.n).toBe(1);
+    expect(f.app.store.get("SELECT status FROM tasks WHERE id=?", child.task_id)?.status).toBe("running");
+    f.app.runtime.cancel(String(child.task_id)); f.app.runtime.cancel(task);
   }, 40_000);
   it("publishes peer requests and replies in both Agent inboxes, retaining isolated child execution", async () => {
     const f = await fixture(), botId = String(f.bots[0].id), peer = String(f.bots[1].id);
@@ -714,8 +721,38 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     await wait(() => f.app.store.get("SELECT status FROM tasks WHERE id=?", task)?.status === "succeeded");
     expect(f.fake.requests[0].url).toContain("/v1/messages");
     expect(f.fake.requests[0].body).toContain("NexBot Personal AI OS");
-    expect(JSON.parse(f.fake.requests[0].body).system).toContain("Anthropic 私人秘书");
+    expect(JSON.stringify(JSON.parse(f.fake.requests[0].body).system)).toContain("Anthropic 私人秘书");
   }, 40_000);
+  it("sends only the stable prompt as Anthropic system and appends the volatile block after the history, keeping the prefix byte-stable", async () => {
+    const f = await fixture();
+    f.app.store.saveConfig({ provider: "anthropic", endpoint: f.fake.origin, model: "fixture-anthropic", apiKey: "synthetic-anthropic-key" });
+    f.fake.scripts.push({ kind: "anthropic-tool", id: "toolu_prefix", name: "broker", args: JSON.stringify({ action: "agent.directory" }) }, { kind: "anthropic-text", text: "第一轮完成" }, { kind: "anthropic-text", text: "第二轮完成" });
+    type Part = { type: string; text?: string; cache_control?: unknown };
+    type Wire = { role: string; content: string | Part[] };
+    for (const text of ["第一轮：只讨论", "第二轮：继续"]) {
+      const task = f.app.runtime.input(f.conversation, text, id());
+      await wait(() => f.app.store.get("SELECT status FROM tasks WHERE id=?", task)?.status === "succeeded");
+      await wait(() => !f.app.runtime.workers.size);
+    }
+    const bodies = f.fake.requests.map((r) => JSON.parse(r.body) as { system: Array<Part & { cache_control?: { type: string; ttl?: string } }>; messages: Wire[] });
+    expect(bodies).toHaveLength(3);
+    const isVolatile = (part: Part) => part.type === "text" && part.text?.startsWith("<system-reminder>");
+    const strip = (messages: Wire[]) => JSON.parse(JSON.stringify(messages, (key, value) => key === "cache_control" ? undefined : value)).map((m: Wire) => ({ ...m, content: Array.isArray(m.content) ? m.content.filter((part) => !isVolatile(part)) : m.content }));
+    for (const body of bodies) {
+      expect(typeof body.system === "string" ? body.system : JSON.stringify(body.system)).not.toContain("<system-reminder>");
+      const last = body.messages.at(-1)!, volatile = (last.content as Part[]).filter(isVolatile);
+      expect(last.role).toBe("user"); expect(volatile).toHaveLength(1); expect((last.content as Part[]).at(-1)).toBe(volatile[0]);
+      expect(body.messages.slice(0, -1).flatMap((m) => Array.isArray(m.content) ? m.content : []).some(isVolatile)).toBe(false);
+      expect(volatile[0].text).toContain("当前 Core 时间");
+    }
+    // Tool results stay first in their message; the volatile text follows them.
+    expect((bodies[1].messages.at(-1)!.content as Part[])[0].type).toBe("tool_result");
+    expect(new Set(bodies.map((b) => JSON.stringify(b.system))).size).toBe(1);
+    // The SDK's cache marker stays on the system prompt, with the 1 h retention.
+    for (const body of bodies) expect(body.system).toEqual([expect.objectContaining({ type: "text", cache_control: { type: "ephemeral", ttl: "1h" } })]);
+    const stripped = bodies.map((b) => strip(b.messages));
+    for (let i = 1; i < 3; i++) expect(JSON.stringify(stripped[i].slice(0, stripped[i - 1].length))).toBe(JSON.stringify(stripped[i - 1]));
+  }, 60_000);
   it("runs the fixed SDK, persists input/reply, deduplicates lost ACK, and hides credentials", async () => {
     const f = await fixture();
     f.fake.scripts.push({ kind: "openai-text", text: "你好，已连接固定运行时" });
@@ -745,14 +782,15 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     expect(reopened.store.get("SELECT argument_hash FROM tool_calls WHERE id=?", source.id)?.argument_hash).toBe(source.argument_hash);
     expect(() => reopened.runtime.memory.read(String(f.bots[0].id), String(secret.documentId))).toThrow();
     expect(reopened.runtime.memory.prompt(String(f.bots[0].id))).not.toContain("OTHER_AGENT_SECRET");
-    expect(reopened.runtime.memory.prompt(String(f.bots[0].id))).toContain("偏好中文与 Python");
+    expect(reopened.runtime.memory.list(String(f.bots[0].id)).map((doc) => doc.content)).toContain("偏好中文与 Python");
     expect(f.fake.requests.at(-1)?.body).not.toContain("OTHER_AGENT_SECRET");
     expect(reopened.store.all("PRAGMA foreign_key_check")).toEqual([]);
   }, 50_000);
   it("routes a durable A2A child task, returns one result, keeps private contexts separate", async () => {
     const f = await fixture();
-    f.app.runtime.memory.write(String(f.bots[0].id), { title: "Parent secret", content: "PARENT_PRIVATE", scope: "bot" });
-    f.app.runtime.memory.write(String(f.bots[1].id), { title: "Child memory", content: "RESEARCH_PRIVATE", scope: "bot" });
+    // Core memory is what every request of an assistant carries; each assistant sees only its own.
+    f.app.runtime.memory.core.replace("bot", String(f.bots[0].id), { about: ["PARENT_PRIVATE"], topics: [] }, 0);
+    f.app.runtime.memory.core.replace("bot", String(f.bots[1].id), { about: ["RESEARCH_PRIVATE"], topics: [] }, 0);
     f.fake.scripts.push({ kind: "openai-tool", calls: [{ id: "delegate-one", name: "broker", args: JSON.stringify({ action: "agent.delegate", botId: f.bots[1].id, message: "分析材料 A 的优点" }) }] }, { kind: "openai-text", text: "材料 A 的优点是稳定" }, { kind: "openai-text", text: "Beta 已完成：材料 A 稳定" });
     const task = f.app.runtime.input(f.conversation, "让 Beta 分析材料 A", "delegate-client");
     await wait(() => f.app.store.get("SELECT status FROM tasks WHERE id=?", task)?.status === "succeeded");
@@ -933,16 +971,17 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     expect(f.app.store.get("SELECT status FROM assistant_usage WHERE purpose='compact'")).toMatchObject({ status: "succeeded" });
     expect(f.app.store.all("SELECT * FROM transcript WHERE role='user'")).toHaveLength(6);
   }, 60_000);
-  it("supports three-layer prompt cache ordering, routine preemption, steward agent management, tool trajectories, and preview API", async () => {
+  it("supports three-layer prompt cache ordering, independent routine execution, steward agent management, tool trajectories, and preview API", async () => {
     const f = await fixture();
     const botId = String(f.bots[1].id);
-    // 1. Append-only memory ledger ordering + <system-reminder> dynamic tail
-    f.app.runtime.memory.write(botId, { title: "第一条记忆", content: "最早创建的记忆", scope: "bot" });
-    f.app.runtime.memory.write(botId, { title: "第二条记忆", content: "后来追加的记忆", scope: "bot" });
+    // 1. Core memory lines keep their order (a new line goes last) + <system-reminder> dynamic tail
+    f.app.runtime.memory.core.update(botId, { patch: { about: { add: ["最早创建的记忆"] } }, expectedVersion: 0 });
+    f.app.runtime.memory.core.update(botId, { patch: { about: { add: ["后来追加的记忆"] } }, expectedVersion: 1 });
     const promptText = f.app.runtime.memory.prompt(botId);
-    expect(promptText.indexOf("第一条记忆")).toBeLessThan(promptText.indexOf("第二条记忆"));
+    expect(promptText.indexOf("最早创建的记忆")).toBeGreaterThan(0);
+    expect(promptText.indexOf("最早创建的记忆")).toBeLessThan(promptText.indexOf("后来追加的记忆"));
 
-    // 2. Priority delivery: user input preempts an active background routine task
+    // 2. User input gets its own conversation while the routine child keeps running.
     const routine = f.app.routines.save({ botId, name: "后台巡检", prompt: "执行后台例行巡检", scheduleKind: "once", runAt: Date.now() + 60_000 });
     f.fake.scripts.push({ kind: "hang" });
     f.app.routines.runNow(routine.id, id());
@@ -964,8 +1003,10 @@ describe("Personal AI OS production workflows in isolated fixtures", () => {
     expect(f.app.store.get("SELECT id FROM bots WHERE name='数据分析师'")).toBeUndefined();
     f.app.runtime.decide(String(createApproval.id), String(createApproval.argument_hash), true);
     await wait(() => f.app.store.get("SELECT status FROM tasks WHERE id=?", userTurn.taskId)?.status === "succeeded");
-    expect(f.app.store.get("SELECT status FROM tasks WHERE id=?", routineTaskId)?.status).toBe("cancelled");
-    expect(f.app.store.get("SELECT status FROM routine_occurrences WHERE task_id=?", routineTaskId)?.status).toBe("cancelled");
+    expect(f.app.store.get("SELECT status FROM tasks WHERE id=?", routineTaskId)?.status).toBe("running");
+    expect(f.app.store.get("SELECT status FROM routine_occurrences WHERE task_id=?", routineTaskId)?.status).toBe("running");
+    expect(f.app.store.get("SELECT conversation_id FROM tasks WHERE id=?", userTurn.taskId)?.conversation_id).not.toBe(f.app.store.get("SELECT conversation_id FROM tasks WHERE id=?", routineTaskId)?.conversation_id);
+    f.app.runtime.cancel(routineTaskId);
 
     // 3. Steward agent creation & update verification
     const createdBot = f.app.store.get("SELECT * FROM bots WHERE name='数据分析师' AND status='active'");
