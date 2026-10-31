@@ -24,9 +24,15 @@ final class UIState {
     var composerFocusTick = 0
     var inspectorVisible = true
     var inspectorTab = InspectorTab.work
+    /// The left sidebar is open; closed it is an avatar-only dock. Persisted under the web key `nexbot.rail` ("0" = closed).
+    static let railKey = "nexbot.rail"
+    var railOpen = UserDefaults.standard.string(forKey: UIState.railKey) != "0" {
+        didSet { UserDefaults.standard.set(railOpen ? "1" : "0", forKey: UIState.railKey) }
+    }
     var accountMenuOpen = false
     /// The sidebar search text; non-empty replaces the contact list with message hits.
     var contactSearch = ""
+    var todosVisible = false
     /// The open composer popover (＋ menu, permission or model); DEBUG commands set it for screenshots.
     var composerMenu: ComposerMenuKind?
     /// The in-app 退出当前账号？ dialog of the main window.

@@ -124,12 +124,39 @@ describe("Personal composer (Web, Electron and Android WebView)", () => {
     await act(async () => { buttons[1].click(); });
     expect(fixture.api).toHaveBeenCalledWith("approvals", { id: "approval", hash: "digest", allow: true, remember: true });
   });
+  it("opens a read-only routine and allows only confirmed shutdown or deletion", async () => {
+    state.routines = [{ id: "r", bot_id: "agent", name: "例行巡检", prompt: "检查状态", schedule_kind: "interval", task_kind: "monitor", interval_ms: 300000, enabled: 1, next_due_at: 1900000000000 }];
+    state.occurrences = [{ id: "occ", bot_id: "agent", name: "例行巡检", status: "skipped", reason: "已过期", scheduled_at: 1800000000000 }];
+    await act(async () => { sources[0].emit("change", sync); await new Promise(resolve => setTimeout(resolve, 200)); });
+    expect(container.querySelector(".routine-row")!.textContent).toContain("下次");
+    expect(container.querySelector(".routine-summary")!.textContent).toContain("巡检");
+    expect(container.querySelector('.routine-run, .routine-toggle, [aria-label="添加定时任务"]')).toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('.routine-summary')!.click());
+    const dialog = container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).not.toMatch(/现在执行|编辑|恢复/);
+    expect(dialog.querySelector('input, select, textarea')).toBeNull();
+    await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === '关闭任务')!.click());
+    expect(fixture.api).not.toHaveBeenCalledWith('routines/toggle', expect.anything());
+    await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === '确认关闭')!.click());
+    expect(fixture.api).toHaveBeenCalledWith('routines/toggle', { id: 'r', version: undefined, enabled: false });
+  });
+  it("does not select a routine child as the chat task or contact activity", async () => {
+    state.tasks = [{ id: "routine-task", bot_id: "agent", origin: "routine", status: "running", objective: "后台巡检" }];
+    await act(async () => { sources[0].emit("change", sync); await new Promise(resolve => setTimeout(resolve, 200)); });
+    expect(container.querySelector('.composer .send[aria-label="停止任务"]')).toBeNull();
+    expect(container.querySelector(".processing-message")).toBeNull();
+    expect(container.querySelector('.contact-item[data-working="true"]')).toBeNull();
+    state.tasks.push({ id: "chat-task", bot_id: "agent", origin: "user", status: "running" });
+    await act(async () => { sources[0].emit("change", sync); await new Promise(resolve => setTimeout(resolve, 200)); });
+    await act(async () => container.querySelector<HTMLButtonElement>('.composer .send[aria-label="停止任务"]')!.click());
+    expect(fixture.api).toHaveBeenCalledWith("cancel", { taskId: "chat-task" });
+  });
   it("turns the send key into a stop key while the Agent works and the composer is empty", async () => {
     state = { ...state, connected: true, tasks: [{ id: "task-1", bot_id: "agent", status: "running", objective: "fixture" }] } as State;
     await act(async () => { sources[0].emit("change", sync); await new Promise((resolve) => setTimeout(resolve, 300)); });
     const stop = container.querySelector<HTMLButtonElement>('.composer .send[aria-label="停止任务"]');
     expect(stop).not.toBeNull();
-    expect(container.querySelector('.task-status [aria-label="停止任务"]')).toBeNull();
+    expect(container.querySelector('.task-status')).toBeNull();
     await act(async () => { stop!.click(); });
     expect(fixture.api).toHaveBeenCalledWith("cancel", { taskId: "task-1" });
     await type("补充一句");
@@ -220,12 +247,58 @@ describe("Personal composer (Web, Electron and Android WebView)", () => {
     expect(container.querySelector(".boot")).toBeNull();
     const optimisticElement = container.querySelector('[data-message-id^="optimistic:"]');
     expect(container.querySelector(".processing-caption")?.textContent).toBe("正在发送…");
-    expect(container.querySelector(".task-status")).not.toBeNull();
+    expect(container.querySelector(".task-status")).toBeNull();
     await act(async () => { releaseInput(); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(transcript()).toContain("更早的问题");
     expect(transcript().split("刚发出去").length - 1).toBe(1);
     expect(container.querySelector('[data-message-id="sent"]')).toBe(optimisticElement);
+  });
+
+  it("keeps the in-progress row when a newer sync supersedes the send reload", async () => {
+    const gates: Array<(value: State) => void> = [];
+    fixture.api.mockImplementation((route: string) => {
+      if (route === "state") return new Promise<State>((resolve) => { gates.push(resolve); });
+      if (route === "agents/input") return Promise.resolve({});
+      if (route.startsWith("agents/messages")) return Promise.resolve({ sync, messages: [], streaming: [], hasMore: false });
+      return Promise.resolve({});
+    });
+    await type("你好");
+    await act(async () => {
+      composer().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(gates).toHaveLength(1);
+    expect(container.querySelector(".processing-caption")?.textContent).toBe("正在发送…");
+    await act(async () => {
+      sources.at(-1)!.emit("change", sync);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(gates).toHaveLength(2);
+    await act(async () => { gates[0](state); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(container.querySelector(".processing-message")).not.toBeNull();
+    expect(container.querySelector(".processing-caption")?.textContent).toBe("正在发送…");
+    await act(async () => {
+      gates[1]({ ...state, tasks: [{ id: "t1", bot_id: "agent", status: "running", origin: "user" }] });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector(".processing-message")).not.toBeNull();
+    expect(container.querySelector(".processing-caption")?.textContent).toBe("执行中");
+  });
+
+  it("does not paint the live reply again once that text is in the transcript", async () => {
+    const history = [{ id: "answer", role: "assistant", kind: "message", content: "完整回复", created_at: 2, seq: 2, task_id: "t1" }];
+    fixture.api.mockImplementation(async (route: string) => {
+      if (route === "state") return { ...state, tasks: [{ id: "t1", bot_id: "agent", status: "succeeded", origin: "user" }] };
+      if (route.startsWith("agents/messages")) return { sync, messages: history, streaming: [{ taskId: "t1", text: "完整回复" }, { taskId: "t2", text: "另一段" }], hasMore: false };
+      return {};
+    });
+    await act(async () => { sources[0].emit("change", sync); await new Promise((resolve) => setTimeout(resolve, 200)); });
+    const transcript = container.querySelector(".transcript")!.textContent ?? "";
+    expect(transcript.split("完整回复").length - 1).toBe(1);
+    expect(transcript).toContain("另一段");
+    expect(transcript).toContain("正在回复…");
+    expect(container.querySelector(".processing-message")).toBeNull();
   });
 
   it("preserves scrollback until sending, then returns to and follows the bottom", async () => {

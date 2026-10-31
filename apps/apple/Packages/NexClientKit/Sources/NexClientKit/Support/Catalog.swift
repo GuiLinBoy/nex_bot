@@ -39,15 +39,16 @@ public struct PolicyAction: Sendable, Hashable, Identifiable {
 
 /// Tool actions offered by the shared permission editor.
 public enum PolicyCatalog {
-    public static let universalActions: Set<String> = ["image.models", "image.generate", "html.render"]
+    public static let universalActions: Set<String> = ["image.models", "image.generate", "html.render", "tool.search"]
     /// Order of the server's `actions` list (`policy.ts`).
     public static let serverOrder: [String] = [
         "memory.search", "memory.reflect", "memory.read", "memory.write", "memory.delete", "memory.forget",
         "agent.directory", "agent.delegate", "agent.create", "agent.update",
+        "todo.list", "todo.save", "todo.delete",
         "routine.list", "routine.save", "routine.toggle", "routine.run",
         "device.inventory", "device.info", "device.list", "device.read", "device.exec", "device.computer",
         "skill.list", "skill.read", "connector.list", "connector.tools", "connector.call",
-        "attachment.read", "image.models", "image.generate", "html.render",
+        "attachment.read", "image.models", "image.generate", "html.render", "tool.search",
     ]
     /// Order of the web checkbox grid, with Chinese labels.
     public static let uiOrder: [PolicyAction] = [
@@ -57,6 +58,10 @@ public enum PolicyCatalog {
         .init(id: "memory.write", label: "维护自身私有记忆"),
         .init(id: "memory.delete", label: "撤回自身私有记忆"),
         .init(id: "memory.forget", label: "彻底遗忘相关原文与副本"),
+        .init(id: "tool.search", label: "查询工具"),
+        .init(id: "todo.list", label: "查看待办"),
+        .init(id: "todo.save", label: "保存待办"),
+        .init(id: "todo.delete", label: "删除待办"),
         .init(id: "routine.list", label: "查看自己的计划"),
         .init(id: "routine.save", label: "安排或修改自己的计划"),
         .init(id: "routine.toggle", label: "暂停或恢复自己的计划"),
@@ -99,7 +104,7 @@ public enum MemoryLabels {
         case "user_stated": "用户陈述"
         case "peer_reported": "同伴转述"
         case "agent_inferred": "Agent 推断"
-        case "synthesized": "综合观察"
+        case "synthesized": "主题"
         default: value
         }
     }

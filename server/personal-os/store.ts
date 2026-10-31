@@ -9,7 +9,18 @@ import { connectorSchema } from "./connector-schema.ts";
 import { feishuSchema } from "./feishu/feishu-schema.ts";
 import { appearanceSchema } from "./appearance-schema.ts";
 import { continuitySchema } from "./continuity-schema.ts";
+import { episodeSchema } from "./episodes-schema.ts";
+import { trigramSchema, vectorSchema } from "./retrieval-schema.ts";
+import { recallSchema, WORKING_NOTE_TOKENS } from "./recall-schema.ts";
+import { routineSchema } from "./routine-schema.ts";
+import { rebuildMemories, topicSchema } from "./topic-schema.ts";
+import { applyTreeSchema, treeMigrationSql } from "./topic-tree-schema.ts";
+import { accessMigrationSql, applyAccessSchema, applyResidentSchema, residentMigrationSql } from "./topic-access-schema.ts";
+import { clipTokens, tokens } from "./token-estimate.ts";
+import { ModelCalibration } from "./calibration.ts";
 import { ModelLimits, modelLimitScope, parseModelLimit, validateModelLimits, type ModelCatalogConfig, type ModelLimitOverrides } from "./model-limits.ts";
+
+import { todoSchema } from "./todo-schema.ts";
 
 export type Row = Record<string, string | number | null>;
 export const id = () => randomUUID();
@@ -58,6 +69,7 @@ export class CoreStore {
   readonly workspace = "personal";
   readonly session = "desktop-owner";
   readonly modelLimits: ModelLimits;
+  readonly calibration = new ModelCalibration(this);
   constructor(dir: string, readonly key: Buffer, token: string, catalog?: ModelCatalogConfig) {
     if (key.length !== 32) throw new Error("Invalid credential vault key");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -306,6 +318,113 @@ CREATE UNIQUE INDEX personal_connector_account ON personal_connectors(workspace_
       this.db.exec(feishuSchema);
       this.insert("schema_migrations", { version: 25, checksum: hash(feishuSchema), applied_at: now() });
     });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=26")) this.transaction(() => {
+      // Per-model ratio of real input tokens to the offline estimate; see calibration.ts.
+      const schema = "CREATE TABLE IF NOT EXISTS model_calibration(provider TEXT NOT NULL,endpoint TEXT NOT NULL,model TEXT NOT NULL,ratio REAL NOT NULL,samples INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(provider,endpoint,model)) STRICT;";
+      this.db.exec(schema);
+      this.insert("schema_migrations", { version: 26, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=27")) this.transaction(() => {
+      // Working context budget override (nullable: default is min(64k, input budget)); see model-limits.ts.
+      const schema = "ALTER TABLE model_limit_overrides ADD COLUMN context_budget INTEGER;";
+      if (!this.all("PRAGMA table_info(model_limit_overrides)").some((column) => column.name === "context_budget")) this.db.exec(schema);
+      this.insert("schema_migrations", { version: 27, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=28")) this.transaction(() => {
+      // Background context maintenance has no task, so it is not a task_run (whose task is required and
+      // referenced by tool calls and model invocations): its own run table, one active run per conversation.
+      // Maintenance summaries are told apart in assistant_usage by purpose 'maintain' and the conversation.
+      const schema = `CREATE TABLE IF NOT EXISTS maintenance_runs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,bot_id TEXT NOT NULL,runtime_session_id TEXT NOT NULL,model_id TEXT NOT NULL,reason TEXT NOT NULL CHECK(reason IN ('digest','budget')),status TEXT NOT NULL CHECK(status IN ('active','ended','failed','interrupted')),estimate INTEGER NOT NULL,error TEXT,started_at INTEGER NOT NULL,ended_at INTEGER,CHECK((status='active')=(ended_at IS NULL))) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS maintenance_one_active ON maintenance_runs(conversation_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS maintenance_runs_conversation ON maintenance_runs(conversation_id,started_at);
+ALTER TABLE assistant_usage ADD COLUMN conversation_id TEXT;
+CREATE INDEX IF NOT EXISTS assistant_usage_maintain ON assistant_usage(conversation_id,purpose,created_at);`;
+      const hasColumn = this.all("PRAGMA table_info(assistant_usage)").some((column) => column.name === "conversation_id");
+      this.db.exec(hasColumn ? schema.replace("ALTER TABLE assistant_usage ADD COLUMN conversation_id TEXT;\n", "") : schema);
+      this.insert("schema_migrations", { version: 28, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=29")) this.transaction(() => {
+      // Episode archives, their index, one-shot new-topic marks and the memory pump's cursor over archives.
+      this.db.exec(this.all("PRAGMA table_info(assistant_memory_settings)").some((column) => column.name === "episode_cursor") ? episodeSchema.replace("ALTER TABLE assistant_memory_settings ADD COLUMN episode_cursor INTEGER NOT NULL DEFAULT 0;\n", "") : episodeSchema);
+      this.insert("schema_migrations", { version: 29, checksum: hash(episodeSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=30")) this.transaction(() => {
+      // Failure/backoff state of the background memory steps (retain, consolidate, understanding): one row per
+      // assistant and step, present only while the step's latest attempts failed; a success deletes it.
+      const schema = "CREATE TABLE IF NOT EXISTS assistant_memory_steps(bot_id TEXT NOT NULL REFERENCES bots(id),step TEXT NOT NULL,failures INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,error TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY(bot_id,step)) STRICT;";
+      this.db.exec(schema);
+      this.insert("schema_migrations", { version: 30, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=31")) this.transaction(() => {
+      // Compaction targets (a tool result, or the range of a history batch) whose summary failed, with the retry backoff; see compaction-failures.ts.
+      const schema = "CREATE TABLE IF NOT EXISTS compaction_failures(runtime_id TEXT NOT NULL,target TEXT NOT NULL,attempts INTEGER NOT NULL,next_at INTEGER NOT NULL,last_error TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(runtime_id,target)) STRICT;";
+      this.db.exec(schema);
+      this.insert("schema_migrations", { version: 31, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=32")) this.transaction(() => {
+      // Trigram full-text indexes for memories, episode archives and memory documents; rebuilt from the sources.
+      this.db.exec(trigramSchema);
+      this.insert("schema_migrations", { version: 32, checksum: hash(trigramSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=33")) this.transaction(() => {
+      // Embeddings of the memory pool and the user's embedding/rerank settings; see retrieval.ts.
+      this.db.exec(vectorSchema);
+      this.insert("schema_migrations", { version: 33, checksum: hash(vectorSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=34")) this.transaction(() => {
+      // Core memory, the once-per-task recall cache and per-conversation working notes; see recall-schema.ts.
+      this.db.exec(recallSchema);
+      // Each assistant's working note moves to its most recently active conversation (a delegated child conversation
+      // is not one). The old table stays for rollback. A note over the 1000-token cap cannot be summarized here, so
+      // it is cut at the cap and says so; the full text remains in the old table.
+      for (const note of this.all("SELECT * FROM assistant_working_notes")) {
+        const target = this.get("SELECT c.id FROM conversations c WHERE c.bot_id=? AND c.status='open' AND c.id NOT IN (SELECT child_conversation_id FROM a2a_messages) ORDER BY COALESCE((SELECT MAX(i.created_at) FROM conversation_inputs i WHERE i.conversation_id=c.id),c.created_at) DESC,c.created_at DESC,c.rowid DESC LIMIT 1", note.bot_id);
+        if (!target) continue;
+        const marker = "\n（已截断；完整内容在旧工作笔记表）", content = tokens(note.content) > WORKING_NOTE_TOKENS ? clipTokens(String(note.content), WORKING_NOTE_TOKENS - tokens(marker)).trimEnd() + marker : String(note.content);
+        this.run("INSERT OR IGNORE INTO conversation_working_notes(conversation_id,bot_id,content,task_id,version,updated_at) VALUES(?,?,?,?,?,?)", target.id, note.bot_id, content, note.task_id, note.version, note.updated_at);
+      }
+      this.insert("schema_migrations", { version: 34, checksum: hash(recallSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=35")) this.transaction(() => {
+      // Topic entries: the memory table allows the kind 'topic' (rebuilt once, rows and rowids kept), plus the evidence,
+      // core-index and migration-marker tables; see topic-schema.ts. Safe to run again.
+      if (!String(this.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_memories'")?.sql).includes("'topic'")) this.db.exec(rebuildMemories);
+      this.db.exec(topicSchema);
+      this.insert("schema_migrations", { version: 35, checksum: hash(topicSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=36")) this.transaction(() => {
+      this.db.exec(routineSchema);
+      this.insert("schema_migrations", { version: 36, checksum: hash(routineSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=37")) this.transaction(() => {
+      const schema = "ALTER TABLE agent_routines ADD COLUMN deleted_at INTEGER;";
+      this.db.exec(schema);
+      this.insert("schema_migrations", { version: 37, checksum: hash(schema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=38")) this.transaction(() => {
+      this.db.exec(todoSchema);
+      this.insert("schema_migrations", { version: 38, checksum: hash(todoSchema), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=39")) this.transaction(() => {
+      // The two-level structure of assistant topics (containers), their members and moves; see topic-tree-schema.ts. No data moves.
+      applyTreeSchema(this.db);
+      this.insert("schema_migrations", { version: 39, checksum: hash(treeMigrationSql), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=40")) this.transaction(() => {
+      // User topics and who may see them: access grants, delegations of questions, hints kept with the recall; see topic-access-schema.ts. No data moves.
+      applyAccessSchema(this.db);
+      this.insert("schema_migrations", { version: 40, checksum: hash(accessMigrationSql), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=41")) this.transaction(() => {
+      // A resident topic shown shortened when its overview outgrows a reader's core memory; see topic-access-schema.ts.
+      applyResidentSchema(this.db);
+      this.insert("schema_migrations", { version: 41, checksum: hash(residentMigrationSql), applied_at: now() });
+    });
+    if (!this.get("SELECT version FROM schema_migrations WHERE version=42")) this.transaction(() => {
+      const schema = "CREATE TABLE todo_tool_receipts (call_id TEXT PRIMARY KEY REFERENCES tool_calls(id), argument_hash TEXT NOT NULL, todo_id TEXT NOT NULL REFERENCES todos(id));";
+      this.db.exec(schema);
+      this.insert("schema_migrations", { version: 42, checksum: hash(schema), applied_at: now() });
+    });
     this.db.exec("PRAGMA secure_delete=ON;");
   }
   scope() { return { workspace_id: this.workspace, owner_user_id: this.owner }; }
@@ -374,7 +493,7 @@ CREATE UNIQUE INDEX personal_connector_account ON personal_connectors(workspace_
   modelLimitSettings(input: Record<string, unknown>) {
     const scope = modelLimitScope(input);
     const row = this.get("SELECT * FROM model_limit_overrides WHERE provider=? AND endpoint=? AND model=?", scope.provider, scope.endpoint, scope.model);
-    const manual: ModelLimitOverrides = { contextWindow: row?.context_window == null ? null : Number(row.context_window), maxOutputTokens: row?.max_output_tokens == null ? null : Number(row.max_output_tokens) };
+    const manual: ModelLimitOverrides = { contextWindow: row?.context_window == null ? null : Number(row.context_window), maxOutputTokens: row?.max_output_tokens == null ? null : Number(row.max_output_tokens), contextBudget: row?.context_budget == null ? null : Number(row.context_budget) };
     return this.modelLimits.resolve(scope, manual);
   }
   saveConfig(value: Record<string, unknown>) {
@@ -388,12 +507,13 @@ CREATE UNIQUE INDEX personal_connector_account ON personal_connectors(workspace_
     const manual = {
       contextWindow: value.contextWindow === undefined ? previous.contextWindow : parseModelLimit(value.contextWindow, "contextWindow"),
       maxOutputTokens: value.maxOutputTokens === undefined ? previous.maxOutputTokens : parseModelLimit(value.maxOutputTokens, "maxOutputTokens"),
+      contextBudget: value.contextBudget === undefined ? previous.contextBudget : parseModelLimit(value.contextBudget, "contextBudget"),
     };
     validateModelLimits(this.modelLimits.resolve(scope, manual));
     const secret = typeof value.apiKey === "string" && value.apiKey.trim() ? text(value.apiKey, 8192) : undefined;
     if (!secret && !this.get("SELECT id FROM secrets WHERE id='model-key'")) throw new Error("请配置 API Key");
     this.transaction(() => {
-      this.run("INSERT INTO model_limit_overrides VALUES(?,?,?,?,?) ON CONFLICT(provider,endpoint,model) DO UPDATE SET context_window=excluded.context_window,max_output_tokens=excluded.max_output_tokens", scope.provider, scope.endpoint, scope.model, manual.contextWindow, manual.maxOutputTokens);
+      this.run("INSERT INTO model_limit_overrides(provider,endpoint,model,context_window,max_output_tokens,context_budget) VALUES(?,?,?,?,?,?) ON CONFLICT(provider,endpoint,model) DO UPDATE SET context_window=excluded.context_window,max_output_tokens=excluded.max_output_tokens,context_budget=excluded.context_budget", scope.provider, scope.endpoint, scope.model, manual.contextWindow, manual.maxOutputTokens, manual.contextBudget);
       if (secret) this.run("INSERT INTO secrets VALUES('model-key',?) ON CONFLICT(id) DO UPDATE SET ciphertext=excluded.ciphertext", this.encrypt(secret));
       this.run("INSERT INTO model_connections(id,workspace_id,owner_user_id,display_name,provider_id,endpoint,credential_ref,default_model,status,created_at) VALUES('default',?,?,?,?,?,'model-key',?,'active',?) ON CONFLICT(id) DO UPDATE SET provider_id=excluded.provider_id,endpoint=excluded.endpoint,default_model=excluded.default_model,version=version+1", this.workspace, this.owner, "Default", provider, endpoint.toString().replace(/\/$/, ""), model, now());
       this.run("UPDATE bots SET model_connection_id='default' WHERE model_connection_id IS NULL");
@@ -411,7 +531,7 @@ CREATE UNIQUE INDEX personal_connector_account ON personal_connectors(workspace_
     const scope = modelLimitScope({ provider: row.provider_id, endpoint: row.endpoint, model: (botId && this.botModelSelection(botId)?.selected_model) || row.default_model });
     const limits = this.modelLimitSettings(scope);
     validateModelLimits(limits);
-    return { ...scope, contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens, apiKey: this.decrypt(String(secret.ciphertext)), version: Number(row.version) };
+    return { ...scope, contextWindow: limits.contextWindow, maxOutputTokens: limits.maxOutputTokens, contextBudget: limits.contextBudget, apiKey: this.decrypt(String(secret.ciphertext)), version: Number(row.version) };
   }
   createBot(name: string, instructions?: unknown) {
     const botId = id();
@@ -488,7 +608,7 @@ CREATE UNIQUE INDEX personal_connector_account ON personal_connectors(workspace_
       delegations: this.all("SELECT * FROM a2a_messages ORDER BY created_at DESC LIMIT 100"),
       memories: this.all("SELECT d.id,d.scope,d.bot_id,d.title,d.version,d.updated_at,c.content FROM memory_documents d JOIN memory_content c ON c.document_id=d.id WHERE d.status='active' ORDER BY d.updated_at DESC"),
       devices: this.all("SELECT id,name,status,capabilities_json FROM devices"),
-      tasks: this.all("SELECT id,conversation_id,bot_id,objective,status,result_summary,created_at,ended_at,(SELECT tool_name FROM tool_calls WHERE task_id=tasks.id AND status IN ('proposed','awaiting_approval','ready','executing','unknown') ORDER BY created_at DESC LIMIT 1) active_tool FROM tasks ORDER BY ended_at IS NULL DESC,created_at DESC LIMIT 200"),
+      tasks: this.all("SELECT id,conversation_id,bot_id,objective,status,result_summary,created_at,ended_at,(SELECT origin FROM agent_task_links WHERE task_id=tasks.id) origin,(SELECT tool_name FROM tool_calls WHERE task_id=tasks.id AND status IN ('proposed','awaiting_approval','ready','executing','unknown') ORDER BY created_at DESC LIMIT 1) active_tool FROM tasks ORDER BY ended_at IS NULL DESC,created_at DESC LIMIT 200"),
       usage: this.all("SELECT r.bot_id,COUNT(m.id) calls,COALESCE(SUM(m.input_tokens),0) input_tokens,COALESCE(SUM(m.output_tokens),0) output_tokens FROM model_invocations m JOIN task_runs r ON r.id=m.run_id WHERE m.status='succeeded' GROUP BY r.bot_id"),
     };
   }
