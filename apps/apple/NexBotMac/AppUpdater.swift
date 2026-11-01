@@ -59,7 +59,9 @@ final class AppUpdater {
         helper.executableURL = URL(fileURLWithPath: "/bin/sh")
         helper.arguments = [script.path, String(ProcessInfo.processInfo.processIdentifier)]
         try helper.run()
-        NSApp.terminate(nil)
+        // terminate() spins a nested run loop while the delegate defers; doing that inside this main-actor job would
+        // starve the delegate's shutdown task, so quit from a fresh job after install() has returned.
+        Task { @MainActor in NSApp.terminate(nil) }
     }
 
     /// Mounts the DMG, checks the app inside, and writes the swap script. Returns the script.
