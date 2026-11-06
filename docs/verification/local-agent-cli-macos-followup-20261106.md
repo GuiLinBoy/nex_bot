@@ -38,7 +38,7 @@ Electron **39.8.10** / Node **22.22.1**, arm64.
 | Installed Codex and Claude initialize/stop contract | Both initialized and confirmed stopped |
 | Installed CLIs with the built executor under Node 26.5.0 | Both completed two turns and resumed the same native conversation |
 | Same installed-CLI smoke under Electron's Node 22.22.1 | Both completed two turns, resumed the same native conversation and stopped |
-| Updated development-shell login, restart, device control and account-isolation fixture | **31 checks passed** |
+| Updated development-shell login, restart and account-isolation fixture | **31 checks passed** |
 | Core/web UI, local client executor/UI and pinned development-shell preparation | Passed |
 | Frontend/server TypeScript, repository lint, locale validation and whitespace | Passed |
 
@@ -53,9 +53,11 @@ requests for Claude. The updated smoke requires output from the continued turn
 and removal of the session from the live-process map before accepting success.
 
 The updated shell fixture passed device identity across restart, restored login,
-automatic local control, pause/resume lifecycle coverage, logout/session expiry,
-upstream revocation and account/workspace isolation. It used an isolated profile
-and synthetic identity/Core services, and reported `packaged: false`.
+automatic local control, local-device settings, logout/session expiry, upstream
+revocation and account/workspace isolation. It used an isolated profile and
+synthetic identity/Core services, and reported `packaged: false`. Pause/resume
+lifecycle coverage came from the separate device/executor-host protocol tests;
+the shell fixture did not click Pause/Resume controls.
 
 No test retries or application changes were used to obtain these results. The
 fixture logs reported no retained-directory or cleanup errors. Platform/feature
