@@ -113,4 +113,4 @@ Node 26 的 DOM 回归设置 `NODE_OPTIONS=--no-experimental-webstorage`。
 按 `manage-vps` 的连接资料，对 Tokyo Core 进行只读检查时，公网与 ZeroTier SSH
 均在建立会话时关闭连接，因此未取得线上 Core 或 Windows 对应会话的原始证据。
 本次未操作线上服务、用户安装的应用、真实登录与会话，也未发布安装包。
-修复位于本地独立分支，部署及 Windows 实机复测不在上述通过项中。
+上述验证在独立分支完成，线上部署及 Windows 实机复测不在上述通过项中。

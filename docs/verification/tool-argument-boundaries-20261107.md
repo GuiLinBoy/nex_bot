@@ -98,4 +98,4 @@ worker 因此改为从会话中取回对应 call ID 的**原始提案**，再严
 显示为 null 的路径。历史每次 null 的上游原始内容已无法从现有快照恢复；Windows
 对应会话和线上 Core 的原始响应仍未取得，不能宣称所有实例都完全同因。
 
-修复保留在本地 `codex/repeated-tool-loop` 分支；尚未推送、部署线上 Core 或更新安装包。
+上述验证在 `codex/repeated-tool-loop` 独立分支完成。本记录不包含线上 Core 部署或安装包更新。
