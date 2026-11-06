@@ -362,12 +362,17 @@ async function main(value: WorkerConfig) {
   if (!model) throw new Error("Model registration failed");
   const broker = defineTool({ name: "broker", label: "Core Broker", description: brokerDescription,
     parameters: brokerParameters,
-    execute: async (providerId, args) => {
-      // Keep the previous field-type validation without sending every field to the model.
-      const invalid = toolArgumentError(args);
-      if (invalid) throw new Error(invalid);
+    execute: async (providerId) => {
       const source = manager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "assistant" && entry.message.content.some((p) => p.type === "toolCall" && p.id === providerId));
       if (!source) throw new Error("Tool proposal source missing");
+      const calls = source.type === "message" && source.message.role === "assistant" ? source.message.content.filter(part => part.type === "toolCall") : [];
+      const proposal = calls.find(part => part.id === providerId);
+      if (!proposal) throw new Error("Tool proposal source missing");
+      // The SDK can remove optional nulls or coerce numbers to strings. Validate
+      // and forward the recorded proposal so Core sees exactly what was proposed.
+      const args = proposal.arguments;
+      const invalid = toolArgumentError(args);
+      if (invalid) throw new Error(invalid);
       const result = await execute(providerId, source.id, args);
       return { content: toolContent(result), details: { source: "core" }, isError: !!(result as { isError?: boolean; error?: string })?.isError || !!(result as { error?: string })?.error };
     } });

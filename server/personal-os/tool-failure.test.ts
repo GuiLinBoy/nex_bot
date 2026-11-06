@@ -49,6 +49,8 @@ it("identifies invalid field types and nulls without echoing their values", () =
   expect(message).not.toContain("synthetic-private-key");
   expect(toolArgumentError({ action: "device.exec", deviceId: "synthetic-id", command: "pwd" })).toBeUndefined();
   expect(toolArgumentError({ action: "device.exec", deviceId: null, command: null })).toContain("收到 null");
+  expect(toolArgumentError({ action: "device.exec", deviceId: Number.NaN, command: Number.POSITIVE_INFINITY })).toContain("收到 NaN");
+  expect(toolArgumentError({ action: "device.exec", deviceId: Number.NaN, command: Number.POSITIVE_INFINITY })).toContain("非有限 number");
   expect(toolArgumentError(null)).toContain("需要对象");
   expect(toolArgumentError({})).toContain("action");
 });

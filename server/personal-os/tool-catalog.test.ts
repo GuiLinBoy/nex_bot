@@ -6,7 +6,7 @@ import path from "node:path";
 import { CoreStore } from "./store.ts";
 import { actions, evaluateTool, policyTools } from "./policy.ts";
 import { commonToolPrompt, searchTools, toolCatalog } from "./tool-catalog.ts";
-import { brokerDeclaration } from "./broker-tool.ts";
+import { brokerDeclaration, brokerParameters } from "./broker-tool.ts";
 import { tokens } from "./assistant-model.ts";
 import { createPersonalApp } from "./index.ts";
 import { startFakeModel } from "../runtime/pi/p0/fake-model.ts";
@@ -76,7 +76,9 @@ it("keeps todo resident while bounding common help and the wire declaration", ()
   expect(prompt).not.toContain("scheduleKind");
   expect(prompt).not.toContain("intervalMinutes");
   expect(tokens(prompt)).toBeLessThan(800);
-  expect(tokens(brokerDeclaration)).toBeLessThan(250);
+  expect(tokens(brokerDeclaration)).toBeLessThan(1100);
+  expect(brokerParameters.properties).toMatchObject({ deviceId: { type: "string" }, command: { type: "string" }, query: { type: "string" } });
+  expect(brokerParameters.required).toEqual(["action"]);
 });
 
 it.each(["openai", "anthropic"] as const)("discovers a rare action then executes its flat call through the %s worker", async (provider) => {
@@ -108,9 +110,13 @@ it.each(["openai", "anthropic"] as const)("discovers a rare action then executes
   expect(JSON.parse(String(calls[0].result_json)).items[0].parameters.properties).toHaveProperty("scheduleKind");
   expect(app.store.all("SELECT * FROM agent_routines WHERE bot_id=?", bot)).toHaveLength(1);
   expect(model.requests[0].body).toContain("todo.save(title");
-  expect(model.requests[0].body).not.toContain("scheduleKind");
-  expect(model.requests[1].body).toContain("scheduleKind");
-  // The compact wire schema must not drop the previous per-field type checks.
+  const first = JSON.parse(model.requests[0].body);
+  const schema = provider === "openai" ? first.tools[0].function.parameters : first.tools[0].input_schema;
+  expect(schema.properties).toMatchObject({ deviceId: { type: "string" }, command: { type: "string" }, query: { type: "string" }, scheduleKind: { type: "string" } });
+  // Types are declared on the wire, while action-specific help stays on demand.
+  expect(first.messages.map((message: { content: unknown }) => JSON.stringify(message.content)).join("\n")).not.toContain("最短5分钟");
+  expect(model.requests[1].body).toContain("最短5分钟");
+  // Registered field types must retain strict checks on the original values.
   const badArgs = JSON.stringify({ action: "todo.save", title: 123 });
   model.scripts.push(provider === "openai"
     ? { kind: "openai-tool", calls: [{ id: "bad-field", name: "broker", args: badArgs }] }

@@ -1,5 +1,7 @@
 # Verifying OpenMausBot
 
+- [工具参数边界诊断：deviceId 为 null（2026-11-07）](tool-argument-boundaries-20261107.md)
+
 - [重复回复：无效工具调用循环（2026-11-07）](repeated-tool-failures-20261107.md)
 
 - [自有分支整理与隔离验证（2026-11-07）](branch-consolidation-20261107.md)

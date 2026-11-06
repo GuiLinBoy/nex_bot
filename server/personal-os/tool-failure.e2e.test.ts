@@ -40,6 +40,20 @@ function text(model: FakeModel, provider: "openai" | "anthropic", value: string)
   model.scripts.push({ kind: provider === "openai" ? "openai-text" : "anthropic-text", text: value });
 }
 
+it("distinguishes raw NaN from null even when JSON snapshots serialize it as null", async () => {
+  const { app, model, bot, settled } = await fixture("openai");
+  model.scripts.push({ kind: "openai-tool", calls: [{ id: callId(0), name: "broker", args: '{"action":"device.exec","deviceId":NaN,"command":NaN}' }] });
+  text(model, "openai", "非法数值未执行");
+  const sent = app.agents.send(bot, "诊断非法数值", "raw-nan");
+  expect((await settled(sent.taskId)).status).toBe("succeeded");
+  expect(app.store.all("SELECT * FROM tool_calls WHERE task_id=?", sent.taskId)).toHaveLength(0);
+  expect(model.requests[1].body).toContain("deviceId 需要 string（收到 NaN）");
+  const runtime = app.store.get("SELECT runtime_session_id FROM task_runs WHERE task_id=?", sent.taskId)!;
+  const entries = app.runtime.projection.load(String(runtime.runtime_session_id))!;
+  const calls = entries.flatMap(e => e.type === "message" && e.message.role === "assistant" ? e.message.content.filter(p => p.type === "toolCall") : []);
+  expect(calls[0].arguments).toEqual({ action: "device.exec", deviceId: null, command: null });
+}, 60_000);
+
 it.each(["openai", "anthropic"] as const)("%s repeated invalid calls stop before another model request and retain the last result", async provider => {
   const { app, model, bot, settled } = await fixture(provider);
   for (let i = 0; i < 6; i++) tool(model, provider, i, { action: "device.exec", deviceId: null, command: null });
@@ -62,6 +76,16 @@ it.each(["openai", "anthropic"] as const)("%s repeated invalid calls stop before
   expect((await settled(retry.taskId)).status).toBe("succeeded");
   expect(model.requests).toHaveLength(4);
   expect(app.store.all("SELECT * FROM tool_calls")).toHaveLength(0);
+}, 60_000);
+
+it.each(["openai", "anthropic"] as const)("%s validates the original proposal instead of SDK-coerced numeric strings", async provider => {
+  const { app, model, bot, settled } = await fixture(provider);
+  tool(model, provider, 0, { action: "tool.search", query: 123 });
+  text(model, provider, "错误参数没有执行");
+  const sent = app.agents.send(bot, "验证原始参数类型", "raw-invalid-number");
+  expect((await settled(sent.taskId)).status).toBe("succeeded");
+  expect(app.store.all("SELECT * FROM tool_calls WHERE task_id=?", sent.taskId)).toHaveLength(0);
+  expect(model.requests[1].body).toContain("query 需要 string（收到 number）");
 }, 60_000);
 
 it.each(["openai", "anthropic"] as const)("%s reports the invalid fields, preserves long call IDs and allows correction", async provider => {
