@@ -6,8 +6,8 @@ import type { ModelPermit, RuntimeInput, WorkerConfig, WorkerEvent, WorkerReply 
 import { modelConnectionError } from "./model-errors.ts";
 import { modelInputBudget } from "./model-limits.ts";
 import { brokerDescription, brokerParameters } from "./broker-tool.ts";
-import { Check } from "typebox/value";
-import { toolFields } from "./tool-fields.ts";
+import { toolArgumentError } from "./tool-fields.ts";
+import { ToolFailureGuard } from "./tool-failure.ts";
 import { isImagePart, tokens } from './token-estimate.ts';
 import { CONTEXT_OVERHEAD, OUTPUT_TRUNCATED, digestCandidates, dropStaleSystemEntries, editedTargets, entryPage, entryTarget, entryText, episodeStart, foldBlocked, foldable, historySource, hygieneScope, imageCandidates, rangeTarget, reductionLimits, systemMessage, systemPromptText, tailBudgetFor, tailCut, type SourceItem } from './context-tools.ts';
 import { applyRequestPrompt } from './request-prompt.ts';
@@ -15,6 +15,7 @@ import { applyRequestPrompt } from './request-prompt.ts';
 let session: AgentSession | undefined;
 const replies = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
 const projected = new Set<string>();
+const toolFailures = new ToolFailureGuard();
 let activeInvoke: string | undefined;
 // Estimate of the payload most recently sent; reported with its receipt so Core can calibrate.
 let requestEstimate: number | undefined;
@@ -49,6 +50,7 @@ function rpc(event: WorkerEvent): Promise<unknown> {
 function project(input: RuntimeInput, steering: boolean) {
   if (projected.has(input.id)) return;
   projected.add(input.id);
+  toolFailures.reset();
   const entry = manager.getBranch().find((e) => e.type === "custom_message" && e.customType === "nex.input" && (e.details as { inputId?: string } | undefined)?.inputId === input.id);
   if (entry?.type === "custom_message") {
     if (entry.content !== input.text || (entry.details as { hash: string }).hash !== input.hash) throw new Error("Input identity conflict");
@@ -362,7 +364,8 @@ async function main(value: WorkerConfig) {
     parameters: brokerParameters,
     execute: async (providerId, args) => {
       // Keep the previous field-type validation without sending every field to the model.
-      if (!Check(toolFields, args)) throw new Error("工具参数类型无效；请用 tool.search 查询用法");
+      const invalid = toolArgumentError(args);
+      if (invalid) throw new Error(invalid);
       const source = manager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "assistant" && entry.message.content.some((p) => p.type === "toolCall" && p.id === providerId));
       if (!source) throw new Error("Tool proposal source missing");
       const result = await execute(providerId, source.id, args);
@@ -390,6 +393,15 @@ async function main(value: WorkerConfig) {
     session.agent.streamFunction = (requestModel, context, options) => stream(requestModel, context, { ...options, cacheRetention: "long" });
   }
   session.subscribe((event) => {
+    if (event.type === "message_end" && event.message.role === "toolResult") {
+      const result = event.message;
+      const source = manager.getBranch().findLast(entry => entry.type === "message" && entry.message.role === "assistant"
+        && entry.message.content.some(part => part.type === "toolCall" && part.id === result.toolCallId));
+      const calls = source?.type === "message" && source.message.role === "assistant"
+        ? source.message.content.filter(part => part.type === "toolCall") : [];
+      const call = calls.find(part => part.id === result.toolCallId);
+      toolFailures.observe(result.toolName, call?.arguments, result.isError, result.content);
+    }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") send({ type: "delta", text: event.assistantMessageEvent.delta });
     if (event.type === "message_end" && event.message.role === "assistant") {
       send({ type: "snapshot", invokeId: activeInvoke, inputTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite, estimatedTokens: requestEstimate, cacheRead:event.message.usage.cacheRead,cacheWrite:event.message.usage.cacheWrite,outputTokens: event.message.usage.output, modelStatus: event.message.stopReason === "error" ? "failed" : event.message.stopReason === "aborted" ? "cancelled" : "succeeded" });
@@ -408,6 +420,13 @@ async function main(value: WorkerConfig) {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     let sending = false;
     try {
+      if (purpose === "answer" && toolFailures.reason()) {
+        // Persist the final tool result before ending the turn. Otherwise a later
+        // user retry could recover an apparently unanswered call and execute it again.
+        await rpc({ type: "snapshot", entries: snapshot(), inputs: [...projected] });
+        const reason = toolFailures.reason();
+        if (reason) throw new Error(reason);
+      }
       if (url.origin !== endpoint.origin || url.username || url.password || !url.pathname.startsWith(endpoint.pathname.replace(/\/$/, "") + "/")) throw new Error("Blocked model network destination");
       const permit = await rpc({ type: "request", entries: snapshot(), inputs: [...projected], purpose }) as ModelPermit;
       activeInvoke = permit.invokeId;

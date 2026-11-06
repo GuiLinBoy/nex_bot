@@ -1,5 +1,7 @@
 # Verifying OpenMausBot
 
+- [重复回复：无效工具调用循环（2026-11-07）](repeated-tool-failures-20261107.md)
+
 - [自有分支整理与隔离验证（2026-11-07）](branch-consolidation-20261107.md)
 
 - [Local Agent CLI: macOS follow-up verification (2026-11-06)](local-agent-cli-macos-followup-20261106.md)
