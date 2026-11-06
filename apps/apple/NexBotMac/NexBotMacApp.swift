@@ -60,10 +60,18 @@ enum AppearanceOverride {
 final class ExecutorAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard LocalDeviceController.shared.isRunning else { return .terminateNow }
-        Task { @MainActor in
-            await LocalDeviceController.shared.shutdown()
+        var replied = false
+        let reply = { @MainActor in
+            guard !replied else { return }
+            replied = true
             sender.reply(toApplicationShouldTerminate: true)
         }
+        Task { @MainActor in
+            await LocalDeviceController.shared.shutdown()
+            reply()
+        }
+        // A stuck shutdown must never keep the app (and the updater waiting on it) alive.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { MainActor.assumeIsolated { reply() } }
         return .terminateLater
     }
 }
