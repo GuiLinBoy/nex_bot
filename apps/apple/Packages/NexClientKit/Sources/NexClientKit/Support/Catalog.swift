@@ -46,7 +46,7 @@ public enum PolicyCatalog {
         "agent.directory", "agent.delegate", "agent.create", "agent.update",
         "todo.list", "todo.save", "todo.delete",
         "routine.list", "routine.save", "routine.toggle", "routine.run",
-        "device.inventory", "device.info", "device.list", "device.read", "device.exec", "device.computer",
+        "device.inventory", "device.info", "device.list", "device.read", "device.exec", "device.agent", "device.computer",
         "skill.list", "skill.read", "connector.list", "connector.tools", "connector.call",
         "attachment.read", "image.models", "image.generate", "html.render", "tool.search",
     ]
@@ -73,6 +73,7 @@ public enum PolicyCatalog {
         .init(id: "device.list", label: "查看已授权设备目录"),
         .init(id: "device.read", label: "读取已授权设备文件"),
         .init(id: "device.exec", label: "执行设备终端命令"),
+        .init(id: "device.agent", label: "操作本地 Agent CLI"),
         .init(id: "device.inventory", label: "识别设备与在线状态"),
         .init(id: "device.info", label: "读取设备系统信息"),
         .init(id: "device.computer", label: "使用获准的电脑窗口"),

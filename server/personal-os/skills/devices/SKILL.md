@@ -11,3 +11,5 @@ online=false 表示离线；supported 表示已安装的执行能力；granted �
 完整桌面客户端登录后自动登记此电脑，自动启用文件、终端和支持的电脑控制；同一工作区已暂停的设备保持暂停。根据 inventory/info 的实际 granted 判断权限，不能把已连接或 supported 当成已授权。
 设备已暂停时提示用户到“设置 → 设备”的本设备行恢复控制；不需要配对令牌或逐项能力开关。默认文件读取范围和终端工作目录是系统用户主目录。Mac/Linux 的文件和终端可用，当前原生窗口控制仅支持 Windows；旧版独立执行器以实际权限为准。
 普通操作直接执行；危险操作在实际执行 Agent 的联系人中批准，不能以技能说明代替具体危险操作的批准。
+
+本地 Codex CLI / Claude Code 使用 device.agent；先 tool.search(query="device.agent") 读取操作参数，再 discover 检测目标电脑。Windows 和 Mac 都由该电脑的本机 CLI 执行，可从其他客户端发起。长任务需查 status，使用 nextCursor 增量读取，直到真实完成；start 返回会话不代表任务结束。CLI 需要的确认通过 respond 转回 Core 审批；不代替用户批准。CLI 登录在目标电脑完成，不能索取或上传凭证。

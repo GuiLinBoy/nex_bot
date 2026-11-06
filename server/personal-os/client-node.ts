@@ -5,8 +5,9 @@ import path from "node:path";
 import { DeviceNode } from "./node.ts";
 import type { Row } from "./store.ts";
 
-// Thin clients store only a device execution journal and encrypted connection
-// grants. They do not create a Core database or run an Agent/memory service.
+// Thin clients store a device execution journal and encrypted connection grants.
+// They do not create a Core database or run Core's model/memory service. Local
+// CLI sessions are delegated to DeviceNode using the computer's own CLI account.
 export function createClientNode(dir: string, key: Buffer, changed: () => void, expectedOrigin?: string, options: { autoConnect?: boolean } = {}) {
   if (key.length !== 32) throw new Error("Invalid client vault key");
   mkdirSync(dir, { recursive: true });

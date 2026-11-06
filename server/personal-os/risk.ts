@@ -60,6 +60,9 @@ export function dangerousEffect(args: Record<string, unknown>, connectorTool?: C
   if (args.riskReason !== undefined && (typeof args.riskReason !== "string" || args.riskReason.length > 500)) throw new Error("操作风险说明无效");
   if (args.risk === "dangerous" && ["device.exec", "device.computer", "connector.call"].includes(String(args.action))) return true;
   if (args.action === "connector.call") return connectorNeedsApproval(args, connectorTool);
+  // Delegating a prompt can change the project. Native permission grants must
+  // also pass Core approval; a model-supplied risk=standard cannot waive them.
+  if (args.action === "device.agent") return ["start", "send"].includes(String(args.operation)) || (args.operation === "respond" && (args.parameters as Record<string, unknown> | undefined)?.allow !== false);
   if (args.action === "device.exec") return commandNeedsApproval(String(args.command), args.risk === "standard");
   // Creating or rewriting an Agent changes who can act and what they are told, so the user confirms it.
   return args.action === "memory.delete" || args.action === "memory.forget" || args.action === "agent.create" || args.action === "agent.update";

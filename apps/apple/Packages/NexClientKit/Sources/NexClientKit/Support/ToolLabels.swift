@@ -43,7 +43,7 @@ public enum ToolLabels {
         "routine.run": "立即运行计划",
         "device.list": "查看设备目录",
         "device.read": "读取设备文件",
-        "device.exec": "执行终端命令",
+        "device.exec": "执行终端命令", "device.agent": "操作本地 Agent",
         "device.inventory": "检查设备目录",
         "device.info": "读取设备信息",
         "device.computer": "操作电脑窗口",
@@ -75,7 +75,7 @@ public enum ToolLabels {
         "routine.run": "正在执行例行任务",
         "device.list": "正在查看设备目录",
         "device.read": "正在读取设备文件",
-        "device.exec": "正在执行终端命令",
+        "device.exec": "正在执行终端命令", "device.agent": "正在操作本地 Agent",
         "device.inventory": "正在检查设备状态",
         "device.info": "正在读取设备信息",
         "device.computer": "正在操作电脑窗口",
@@ -85,7 +85,7 @@ public enum ToolLabels {
     static let approvalTitles: [String: String] = [
         "agent.delegate": "联系其他 Agent", "agent.create": "创建新的 Agent", "agent.update": "修改 Agent 的名字和身份说明",
         "memory.write": "写入长期记忆", "memory.forget": "彻底遗忘原文与相关副本（相关工作会停止）", "device.read": "读取设备文件",
-        "device.list": "查看设备目录", "device.exec": "执行终端命令", "device.computer": "操作电脑窗口", "connector.call": "调用连接器工具",
+        "device.list": "查看设备目录", "device.exec": "执行终端命令", "device.agent": "操作本地 Agent", "device.computer": "操作电脑窗口", "connector.call": "调用连接器工具",
     ]
 
     /// Collapsed tool-step label; unknown tools show their name.

@@ -45,7 +45,7 @@ public enum ToolActivity {
     /// Same kinds as the web capsule, in the same order of precedence.
     public static func symbol(for tool: String) -> String {
         if tool.hasPrefix("memory.") { return "brain" }
-        if tool == "device.exec" { return "terminal" }
+        if tool == "device.exec" || tool == "device.agent" { return "terminal" }
         if tool == "device.computer" { return "display" }
         if tool.hasPrefix("device.") { return "folder" }
         if tool.hasPrefix("connector.") { return "powerplug" }

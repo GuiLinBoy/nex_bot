@@ -25,7 +25,7 @@ export class DeviceGateway {
   inventory() {
     return this.store.all("SELECT d.id,d.name,d.platform,d.status,g.scope_json FROM devices d LEFT JOIN device_local_grants g ON g.device_id=d.id AND g.local_grant_id='shared' WHERE d.workspace_id=? AND d.owner_user_id=? AND d.status!='revoked' ORDER BY d.created_at,d.id", this.store.workspace, this.store.owner).map((device) => {
       const scope = device.scope_json ? JSON.parse(String(device.scope_json)) : {};
-      return { id: device.id, name: device.name, platform: device.platform, role: device.id === this.hostDeviceId ? "core" : "node", online: this.sockets.get(String(device.id))?.readyState === WebSocket.OPEN, identity: scope.identity ?? null, supported: scope.identity?.supported ?? [], granted: { info: scope.info === true, read: scope.read === true, exec: scope.exec === true, computer: scope.computer === true } };
+      return { id: device.id, name: device.name, platform: device.platform, role: device.id === this.hostDeviceId ? "core" : "node", online: this.sockets.get(String(device.id))?.readyState === WebSocket.OPEN, identity: scope.identity ?? null, supported: scope.identity?.supported ?? [], granted: { info: scope.info === true, read: scope.read === true, exec: scope.exec === true, agent: scope.agent === true, computer: scope.computer === true } };
     });
   }
   constructor(readonly store: CoreStore, server: Server, readonly changed: () => void) {
@@ -66,12 +66,13 @@ export class DeviceGateway {
           const version = Number(event.policyVersion);
           if (!Number.isSafeInteger(version) || version < 1) throw new Error("Invalid local policy");
           const supplied = event.identity && typeof event.identity === "object" ? event.identity as Record<string, unknown> : {};
-          const identity = { hostname: typeof supplied.hostname === "string" ? supplied.hostname.slice(0, 255) : "", os: typeof supplied.os === "string" ? supplied.os.slice(0, 80) : "", release: typeof supplied.release === "string" ? supplied.release.slice(0, 100) : "", architecture: typeof supplied.architecture === "string" ? supplied.architecture.slice(0, 30) : "", supported: Array.isArray(supplied.supported) ? supplied.supported.filter((action) => ["device.info", "device.read", "device.list", "device.exec", "device.computer"].includes(String(action))) : ["device.read", "device.list", "device.exec"] };
-          const scope = { root: "shared", info: identity.supported.includes("device.info"), read: event.read !== false, exec: event.exec === true, computer: event.computer === true && identity.supported.includes("device.computer"), identity };
-          this.store.run("UPDATE devices SET capabilities_json=?,last_seen_at=?,platform=? WHERE id=?", JSON.stringify([...(scope.info ? ["device.info"] : []), ...(scope.read ? ["device.read", "device.list"] : []), ...(scope.exec ? ["device.exec"] : []), ...(scope.computer ? ["device.computer"] : [])]), now(), ["windows", "macos", "linux"].includes(String(event.platform)) ? String(event.platform) : "windows", deviceId);
+          const identity = { hostname: typeof supplied.hostname === "string" ? supplied.hostname.slice(0, 255) : "", os: typeof supplied.os === "string" ? supplied.os.slice(0, 80) : "", release: typeof supplied.release === "string" ? supplied.release.slice(0, 100) : "", architecture: typeof supplied.architecture === "string" ? supplied.architecture.slice(0, 30) : "", supported: Array.isArray(supplied.supported) ? supplied.supported.filter((action) => ["device.info", "device.read", "device.list", "device.exec", "device.agent", "device.computer"].includes(String(action))) : ["device.read", "device.list", "device.exec"] };
+          const scope = { root: "shared", info: identity.supported.includes("device.info"), read: event.read !== false, exec: event.exec === true, agent: event.exec === true && identity.supported.includes("device.agent"), computer: event.computer === true && identity.supported.includes("device.computer"), identity };
+          this.store.run("UPDATE devices SET capabilities_json=?,last_seen_at=?,platform=? WHERE id=?", JSON.stringify([...(scope.info ? ["device.info"] : []), ...(scope.read ? ["device.read", "device.list"] : []), ...(scope.exec ? ["device.exec"] : []), ...(scope.agent ? ["device.agent"] : []), ...(scope.computer ? ["device.computer"] : [])]), now(), ["windows", "macos", "linux"].includes(String(event.platform)) ? String(event.platform) : "windows", deviceId);
           this.store.run("INSERT INTO device_local_grants(device_id,local_grant_id,workspace_id,owner_user_id,policy_version,scope_json,status,reported_at) VALUES(?,'shared',?,?,?,?, 'active',?) ON CONFLICT(device_id,local_grant_id) DO UPDATE SET policy_version=excluded.policy_version,scope_json=excluded.scope_json,status='active',reported_at=excluded.reported_at", deviceId, this.store.workspace, this.store.owner, version, JSON.stringify(scope), now());
           this.store.run("UPDATE device_grants SET status='stale' WHERE device_id=? AND local_policy_version!=?", deviceId, version);
           ws.send(JSON.stringify({ type: "bound", coreId: this.store.get("SELECT core_id FROM workspaces")!.core_id, deviceId, ownerId: this.store.owner }));
+          if (scope.agent) for (const task of this.store.all("SELECT DISTINCT t.task_id FROM tool_calls t JOIN tasks k ON k.id=t.task_id WHERE t.target_id=? AND t.tool_name='device.agent' AND k.status IN ('cancelled','cancelling') AND t.created_at>?", deviceId, now() - 3 * 60 * 60_000)) ws.send(JSON.stringify({ type: "agent.cancelTask", taskId: task.task_id }));
           const unresolved = this.store.all("SELECT d.id,t.argument_hash,k.status task_status FROM device_calls d JOIN tool_calls t ON t.id=d.id JOIN tasks k ON k.id=t.task_id WHERE d.device_id=? AND d.status='unknown'", deviceId);
           for (const call of unresolved) if (["cancelling", "cancelled"].includes(String(call.task_status))) ws.send(JSON.stringify({ type: "cancel", callId: call.id, argumentHash: call.argument_hash }));
           if (unresolved.length) ws.send(JSON.stringify({ type: "reconcile", calls: unresolved }));
@@ -132,6 +133,7 @@ export class DeviceGateway {
     if (!ws || ws.readyState !== WebSocket.OPEN || !local) throw new Error(!ws || ws.readyState !== WebSocket.OPEN ? "设备离线，请确认设备上的 NexBot 已登录并在线" : "设备没有本地授权，请在设备上开启本机控制");
     if (local.policy_version !== JSON.parse(String(call.authorization_snapshot_json)).localPolicyVersion) throw new Error("设备本地权限版本已变化，旧批准无效");
     if (call.tool_name === "device.exec" && !JSON.parse(String(local.scope_json)).exec) throw new Error("设备未启用终端能力");
+    if (call.tool_name === "device.agent" && !JSON.parse(String(local.scope_json)).agent) throw new Error("目标设备尚不支持本地 Agent，请更新客户端并开启本机控制");
     if (call.tool_name === "device.computer" && !JSON.parse(String(local.scope_json)).computer) throw new Error("设备未启用屏幕控制");
     const old = this.store.get("SELECT * FROM device_calls WHERE id=?", call.id);
     if (old?.result_json) return JSON.parse(String(old.result_json));
@@ -156,6 +158,12 @@ export class DeviceGateway {
     });
   }
   cancelTask(taskId: string) {
+    // A CLI task outlives its acknowledged start call, so cancel it even when
+    // there is no pending DCP delivery left to interrupt.
+    for (const [deviceId, ws] of this.sockets) {
+      const grant = this.store.get("SELECT scope_json FROM device_local_grants WHERE device_id=? AND status='active'", deviceId);
+      if (ws.readyState === WebSocket.OPEN && grant && JSON.parse(String(grant.scope_json)).agent) ws.send(JSON.stringify({ type: "agent.cancelTask", taskId }));
+    }
     for (const call of this.store.all("SELECT d.id,d.device_id,t.argument_hash FROM device_calls d JOIN tool_calls t ON t.id=d.id WHERE t.task_id=? AND d.result_json IS NULL AND d.status IN ('delivered','running','unknown')", taskId)) {
       this.store.run("UPDATE device_calls SET status='unknown' WHERE id=? AND result_json IS NULL", call.id);
       const ws = this.sockets.get(String(call.device_id));

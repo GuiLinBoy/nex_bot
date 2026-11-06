@@ -1,5 +1,7 @@
 # Verifying OpenMausBot
 
+- [Local Codex CLI / Claude Code on Windows and macOS (2026-11-06)](local-agent-cli.md)
+
 - [Five assistant appearances: release verification (2026-11-01)](q-avatar-release-20261101.md)
 
 - [界面单层化：Core、网页、Windows 和 Android 发布（2026-11-01）](single-layer-release-20261101.md)

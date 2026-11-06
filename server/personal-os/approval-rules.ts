@@ -1,20 +1,22 @@
-import { id, now, text, type CoreStore } from "./store.ts";
+import { canonical, hash, id, now, text, type CoreStore } from "./store.ts";
 
 export function approvalRuleScope(args: Record<string, unknown>) {
   const action = text(args.action, 40);
   const target = action.startsWith("device.") ? text(args.deviceId, 100)
     : action === "connector.call" ? text(args.connectorId, 100)
       : action === "agent.update" ? text(args.botId, 100) : "";
-  const operation = action === "device.computer" ? text(args.operation, 80)
+  const operation = action === "device.agent" ? `${text(args.operation, 80)}:${hash(canonical(args.parameters ?? {})).slice(0, 32)}`
+    : action === "device.computer" ? text(args.operation, 80)
     : action === "connector.call" ? text(args.tool, 200) : "";
   return { action, target, operation };
 }
 
 export function approvalRuleLabel(store: CoreStore, scope: ReturnType<typeof approvalRuleScope>): string {
-  const labels: Record<string, string> = { "device.exec": "执行终端命令", "device.computer": "操作电脑", "connector.call": "调用连接器", "agent.create": "创建 Agent", "agent.update": "更新 Agent", "memory.delete": "撤回记忆", "memory.forget": "清理记忆" };
+  const labels: Record<string, string> = { "device.exec": "执行终端命令", "device.agent": "操作本地 Agent", "device.computer": "操作电脑", "connector.call": "调用连接器", "agent.create": "创建 Agent", "agent.update": "更新 Agent", "memory.delete": "撤回记忆", "memory.forget": "清理记忆" };
   const table = scope.action.startsWith("device.") ? "devices" : scope.action === "connector.call" ? "personal_connectors" : "bots";
   const name = scope.target ? store.get(`SELECT name FROM ${table} WHERE id=?`, scope.target)?.name ?? scope.target : "";
-  return [labels[scope.action] ?? scope.action, name, scope.operation].filter(Boolean).join(" · ");
+  const operation = scope.action === "device.agent" ? ({ start: "启动任务", send: "追加指令", respond: "确认 CLI 请求" } as Record<string, string>)[scope.operation.split(":")[0]] ?? "本地会话" : scope.operation;
+  return [labels[scope.action] ?? scope.action, name, operation].filter(Boolean).join(" · ");
 }
 
 export function rememberApproval(store: CoreStore, botId: string, args: Record<string, unknown>, policyVersion: number, resourceVersion: number) {

@@ -8,6 +8,7 @@ import { hash, now, text, type CoreStore } from "./store.ts";
 import os from "node:os";
 import { ComputerExecutor } from "./computer.ts";
 import { DEVICE_LEASE_MS } from "./devices.ts";
+import { LocalAgentSessions } from "./local-agent.ts";
 
 /** A call whose absolute lease is staler than this means the device clock is badly wrong, not merely drifting. */
 const CLOCK_SKEW_TOLERANCE_MS = 5 * 60_000;
@@ -77,19 +78,21 @@ export class DeviceNode {
   readonly operations = new Set<Promise<void>>();
   readonly commands = new Set<ChildProcess>();
   readonly computer = new ComputerExecutor();
-  identity() { return { hostname: os.hostname(), platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux", os: os.type(), release: os.release(), architecture: os.arch(), supported: ["device.info", "device.list", "device.read", "device.exec", ...(this.computer.available() ? ["device.computer"] : [])] }; }
+  readonly agents: LocalAgentSessions;
+  identity() { return { hostname: os.hostname(), platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux", os: os.type(), release: os.release(), architecture: os.arch(), supported: ["device.info", "device.list", "device.read", "device.exec", "device.agent", ...(this.computer.available() ? ["device.computer"] : [])] }; }
   constructor(readonly store: Pick<CoreStore, "dir" | "get" | "run" | "encrypt" | "decrypt">, readonly changed: () => void, enabled = true) {
     const dir = path.join(store.dir, "node"); mkdirSync(dir, { recursive: true });
     this.journal = new DatabaseSync(path.join(dir, "node.db"));
     if (!this.journal.prepare("SELECT name FROM sqlite_master WHERE name='node_bindings'").get()) this.journal.exec(readFileSync(new URL("./node-schema.sql", import.meta.url), "utf8"));
     this.journal.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.journal.prepare("UPDATE node_calls SET status='unknown' WHERE status IN ('running','received')").run();
+    this.agents = new LocalAgentSessions(this.journal, { changed });
     const saved = store.get("SELECT ciphertext FROM secrets WHERE id='node-config'");
     if (saved && enabled) { this.config = JSON.parse(store.decrypt(String(saved.ciphertext))); this.connect(); }
   }
   publicState() { return { status: this.status, origin: this.config?.origin ?? "", root: this.config?.root ?? "", exec: this.config?.exec ?? false, computer: this.config?.computer ?? false, computerSupported: this.computer.available(), deviceId: this.binding?.deviceId ?? "", connected: this.socket?.readyState === WebSocket.OPEN, unknownCalls: this.journal.prepare("SELECT call_id,capability,arguments_json,version FROM node_calls WHERE status='unknown'").all() }; }
   configure(data: Record<string, unknown>) {
-    if (this.executing) throw new Error("设备执行中，请等调用结束再更改授权");
+    if (this.executing || this.agents.active) throw new Error("设备执行中，请等调用结束再更改授权");
     const origin = new URL(text(data.origin, 2048));
     const privateHost = (isIP(origin.hostname) === 4 && /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(origin.hostname)) || origin.hostname === "localhost";
     if (origin.username || origin.password || origin.search || origin.hash || (origin.protocol !== "https:" && !(origin.protocol === "http:" && privateHost))) throw new Error("Core 地址须为 HTTPS 或私有网络 HTTP");
@@ -110,7 +113,7 @@ export class DeviceNode {
     const endpoint = new URL(this.config.origin); endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:"; endpoint.pathname = "/dcp/v1/connect";
     const ws = new WebSocket(endpoint, { headers: { Authorization: `Bearer ${this.config.token}` }, maxPayload: 8 * 1024 * 1024, handshakeTimeout: 10_000 });
     this.socket = ws; this.status = "连接中"; this.changed();
-    ws.on("open", () => { if (this.socket !== ws || this.stopping) return; ws.send(JSON.stringify({ type: "hello", policyVersion: this.config!.policyVersion, read: !!this.config!.root, exec: this.config!.exec, computer: this.config!.computer === true && this.computer.available(), identity: this.identity(), platform: this.identity().platform })); });
+    ws.on("open", () => { if (this.socket !== ws || this.stopping) return; ws.send(JSON.stringify({ type: "hello", policyVersion: this.config!.policyVersion, read: !!this.config!.root, exec: this.config!.exec, agent: this.config!.exec, computer: this.config!.computer === true && this.computer.available(), identity: this.identity(), platform: this.identity().platform })); });
     ws.on("message", (raw) => { try { const operation = this.message(ws, JSON.parse(raw.toString())).catch(() => ws.close(1008, "Invalid command")); this.operations.add(operation); void operation.finally(() => this.operations.delete(operation)); } catch { ws.close(1008, "Invalid message"); } });
     ws.on("error", () => { if (this.socket !== ws || this.stopping) return; this.status = "连接失败，检查 Core 地址和配对令牌"; this.changed(); });
     ws.on("close", () => {
@@ -126,7 +129,7 @@ export class DeviceNode {
       try {
         this.journal.prepare("UPDATE node_bindings SET status='revoked' WHERE id!=?").run(bindingId);
         this.journal.prepare("INSERT INTO node_bindings VALUES(?,?,?,?,?,NULL,'active',?) ON CONFLICT(id) DO UPDATE SET status='active',core_origin=excluded.core_origin").run(bindingId, coreId, deviceId, ownerId, this.config!.origin, now());
-        this.journal.prepare("INSERT INTO local_grants VALUES(?,'shared',?,?,?,'active',?) ON CONFLICT(binding_id,id) DO UPDATE SET policy_version=excluded.policy_version,scope_json=excluded.scope_json,root_mapping_ref=excluded.root_mapping_ref,status='active',updated_at=excluded.updated_at").run(bindingId, this.config!.policyVersion, JSON.stringify({ info: true, read: !!this.config!.root, exec: this.config!.exec, computer: this.config!.computer === true }), this.config!.root, now());
+        this.journal.prepare("INSERT INTO local_grants VALUES(?,'shared',?,?,?,'active',?) ON CONFLICT(binding_id,id) DO UPDATE SET policy_version=excluded.policy_version,scope_json=excluded.scope_json,root_mapping_ref=excluded.root_mapping_ref,status='active',updated_at=excluded.updated_at").run(bindingId, this.config!.policyVersion, JSON.stringify({ info: true, read: !!this.config!.root, exec: this.config!.exec, agent: this.config!.exec, computer: this.config!.computer === true }), this.config!.root, now());
         this.journal.exec("COMMIT");
       } catch (e) { this.journal.exec("ROLLBACK"); throw e; }
       this.binding = { coreId, deviceId, ownerId }; this.status = "已连接"; this.changed();
@@ -144,6 +147,10 @@ export class DeviceNode {
         }
       }
     }
+    if (event.type === "agent.cancelTask") {
+      if (!this.binding || ws !== this.socket) throw new Error("Device is not bound");
+      await this.agents.cancelTask(this.binding.coreId + ":" + this.binding.deviceId, text(event.taskId, 100));
+    }
     if (event.type === "cancel") {
       if (!this.binding || ws !== this.socket) throw new Error("Device is not bound");
       const bindingId = this.binding.coreId + ":" + this.binding.deviceId;
@@ -153,6 +160,7 @@ export class DeviceNode {
       // cancellation itself must never create or execute a missing command.
       if (!row) return;
       if (row.argument_hash !== event.argumentHash) throw new Error("Cancellation identity conflict");
+      if (row.capability === "device.agent") await this.agents.cancelTask(bindingId, String(JSON.parse(String(row.canonical_envelope)).taskId));
       if (this.activeCall?.bindingId === bindingId && this.activeCall.callId === callId && this.activeCall.digest === event.argumentHash) this.activeCall.controller.abort();
       else this.deliver(ws, row);
       return;
@@ -178,7 +186,7 @@ export class DeviceNode {
     if (expires < received - CLOCK_SKEW_TOLERANCE_MS) return this.refuse(ws, callId, digest, "设备系统时钟与 Core 相差超过 5 分钟，请校准系统时间；未启动操作");
     const leaseEnd = received + leaseMs;
     const capability = text(source.capability, 50), args = source.arguments as Record<string, unknown>;
-    if (!["device.info", "device.list", "device.read", "device.exec", "device.computer"].includes(capability)) return this.refuse(ws, callId, digest, "设备不支持该能力，未执行");
+    if (!["device.info", "device.list", "device.read", "device.exec", "device.agent", "device.computer"].includes(capability)) return this.refuse(ws, callId, digest, "设备不支持该能力，未执行");
     this.journal.prepare("INSERT INTO node_calls(binding_id,call_id,local_grant_id,local_policy_version,capability,arguments_json,canonical_envelope,argument_hash,status,lease_seq,lease_expires_at,deadline_at,received_at) VALUES(?,?,'shared',?,?,?,?,?,'received',?,?,?,?)").run(bindingId, callId, this.config.policyVersion, capability, JSON.stringify(args), envelope, digest, leaseSeq, expires, deadline, received);
     this.executing = true;
     const controller = new AbortController();
@@ -188,8 +196,11 @@ export class DeviceNode {
     try {
       const root = this.config.root;
       if (now() >= leaseEnd) throw new Error("执行租约已过期，未启动操作");
-      if (capability === "device.info") result = { ...this.identity(), granted: { info: true, read: !!root, exec: this.config.exec, computer: this.config.computer === true } };
-      else if (capability === "device.computer") {
+      if (capability === "device.info") result = { ...this.identity(), granted: { info: true, read: !!root, exec: this.config.exec, agent: this.config.exec, computer: this.config.computer === true } };
+      else if (capability === "device.agent") {
+        if (!this.config.exec) throw new Error("设备未授权本地 Agent 执行");
+        result = await this.agents.execute({ bindingId, botId: text(source.botId, 100), taskId: text(source.taskId, 100), callId }, args.operation, args.parameters);
+      } else if (capability === "device.computer") {
         if (!this.config.computer) throw new Error("目标设备未提供屏幕控制执行器");
         result = await this.computer.execute(text(args.operation, 80), args.parameters as Record<string, unknown> ?? {}, Math.min(20_000, leaseEnd - now()), controller.signal);
         failed = (result as { isError?: boolean }).isError === true;
@@ -292,6 +303,6 @@ export class DeviceNode {
     this.stopping = true; clearTimeout(this.timer); this.socket?.terminate();
     this.activeCall?.controller.abort();
     for (const child of this.commands) stopOwnedCommand(child);
-    await Promise.allSettled(this.operations); await this.computer.close(); this.journal.close();
+    await this.agents.close(); await Promise.allSettled(this.operations); await this.computer.close(); this.journal.close();
   }
 }

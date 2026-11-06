@@ -6,10 +6,11 @@ import { universalActions } from '../../shared/personal-capabilities.ts';
 import { htmlRenderContent } from '../../shared/html-render.ts';
 import { approvalRuleScope } from "./approval-rules.ts";
 import { TopicAccess } from "./topic-access.ts";
+import { localAgentParameters } from "./local-agent-contract.ts";
 
 // A single registry serves every Agent. A display name never selects tools,
 // permissions, routing or risk rules.
-export const actions = ["memory.search", "memory.reflect", "memory.read", "memory.write", "memory.delete", "memory.forget", "agent.directory", "agent.delegate", "agent.create", "agent.update", "todo.list", "todo.save", "todo.delete", "routine.list", "routine.save", "routine.toggle", "routine.run", "device.inventory", "device.info", "device.list", "device.read", "device.exec", "device.computer", "skill.list", "skill.read", "connector.list", "connector.tools", "connector.call", "attachment.read", "image.models", "image.generate", "html.render", "tool.search"] as const;
+export const actions = ["memory.search", "memory.reflect", "memory.read", "memory.write", "memory.delete", "memory.forget", "agent.directory", "agent.delegate", "agent.create", "agent.update", "todo.list", "todo.save", "todo.delete", "routine.list", "routine.save", "routine.toggle", "routine.run", "device.inventory", "device.info", "device.list", "device.read", "device.exec", "device.agent", "device.computer", "skill.list", "skill.read", "connector.list", "connector.tools", "connector.call", "attachment.read", "image.models", "image.generate", "html.render", "tool.search"] as const;
 // Device binding, Agent policy and effect-specific approval remain independent.
 export const basicActions = [...actions];
 export function policyTools(policy: Row): string[] {
@@ -32,7 +33,10 @@ export function evaluateTool(store: CoreStore, botId: string, args: Record<strin
     resourceVersion = Number(local.policy_version);
     const scope = JSON.parse(String(local.scope_json));
     if (action === "device.info" && !scope.info) throw new Error("此设备 Node 版本尚不支持系统信息，请更新客户端");
-    if (action === "device.computer") {
+    if (action === "device.agent") {
+      if (!scope.agent || !scope.exec) throw new Error("目标设备尚不支持本地 Agent，请更新客户端并开启本机控制");
+      localAgentParameters(args.operation, args.parameters);
+    } else if (action === "device.computer") {
       if (!scope.computer) throw new Error("目标设备未提供可用的 computer use 执行器，请检查客户端运行状态");
       const operation = text(args.operation, 80);
       if (!computerOperations.includes(operation)) throw new Error("不支持的 computer use 操作");
@@ -106,7 +110,7 @@ export function directory(store: CoreStore) {
   return bots.map((bot) => ({ id: bot.id, bot_id: bot.id, name: bot.name, instructions: bot.instructions, description: bot.instructions, version: bot.version,
     expertise: JSON.parse(String(bot.expertise_json)), capabilities: policyTools(bot).filter((tool) => !tool.startsWith("device.") || tool === "device.inventory" || grantVersions.some((grant) => {
       const scope = JSON.parse(String(grant.scope_json));
-      return grant.status === "active" && grant.device_status === "bound" && (tool === "device.exec" ? scope.exec : tool === "device.computer" ? scope.computer : tool === "device.info" ? scope.info : scope.read !== false);
+      return grant.status === "active" && grant.device_status === "bound" && (tool === "device.agent" ? scope.agent : tool === "device.exec" ? scope.exec : tool === "device.computer" ? scope.computer : tool === "device.info" ? scope.info : scope.read !== false);
     })),
     ...(duties.get(String(bot.id))?.length ? { responsibilities: duties.get(String(bot.id)) } : {}),
     availability: store.get("SELECT id FROM tasks WHERE bot_id=? AND ended_at IS NULL", bot.id) ? "busy" : "ready", profile_version: bot.version, capability_version: bot.policy_version, directory_version: revision }));

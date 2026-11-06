@@ -376,6 +376,7 @@ export class AgentModule {
                 else if (c.tool_name === "memory.core.update") summary = "核心记忆";
                 else if (c.tool_name === "memory.topic") summary = `主题${String(a.op ?? "")}`.slice(0, 40);
                 else if (c.tool_name === "device.read" || c.tool_name === "device.list") summary = String(a.path || ".").slice(0, 120);
+                else if (c.tool_name === "device.agent") summary = `本地 Agent · ${String(a.operation || "")}`;
                 else if (c.tool_name === "device.exec") summary = String(a.command || "").slice(0, 80);
                 else if (c.tool_name === "device.computer") summary = String(a.operation || "").slice(0, 60);
                 else if (c.tool_name === "agent.delegate" || c.tool_name === "agent.update") {
