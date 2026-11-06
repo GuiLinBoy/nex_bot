@@ -12,6 +12,11 @@ model selection, Escape focus and mobile popover bounds.
 
 The records below describe earlier releases.
 
+The [2026-11-07 combined-tree verification](branch-consolidation-20261107.md)
+records 47 current workspace checks, including these composer checks. Its
+routine coverage uses the current read-only details and confirmed closure;
+fixture setup and execution use only an authenticated disposable Core API.
+
 
 The user selected existing functionality only. The permission control now uses a
 compact icon button and a rounded menu with a checkmark on the selected mode.

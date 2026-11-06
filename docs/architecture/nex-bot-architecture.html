@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nex_bot 架构总览</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #1d2330; --muted: #5d6677; --line: #d7dce5;
+    --blue: #2f6fed; --blue-bg: #e8f0ff; --green: #1b8a5a; --green-bg: #e3f6ec;
+    --orange: #c8641a; --orange-bg: #fff0e1; --purple: #7a4fd0; --purple-bg: #f0eaff;
+    --gray-bg: #eceef3; --red: #c0392b; --red-bg: #fdeceb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+  header { padding: 40px 24px 28px; background: #1d2330; color: #fff; }
+  header h1 { margin: 0 0 6px; font-size: 28px; }
+  header p { margin: 0; color: #b9c1d1; max-width: 900px; }
+  nav { position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid var(--line); padding: 10px 24px; display: flex; gap: 18px; flex-wrap: wrap; font-size: 14px; }
+  nav a { color: var(--blue); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  main { max-width: 1100px; margin: 0 auto; padding: 8px 24px 80px; }
+  section { margin-top: 36px; }
+  h2 { font-size: 22px; margin: 0 0 4px; padding-left: 12px; border-left: 5px solid var(--blue); }
+  h3 { font-size: 16px; margin: 22px 0 6px; }
+  .sub { color: var(--muted); margin: 4px 0 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 12px; }
+  .diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; overflow-x: auto; }
+  svg { display: block; margin: 0 auto; max-width: 100%; height: auto; font-family: inherit; }
+  svg text { fill: var(--ink); font-size: 13px; }
+  svg .t-sm { font-size: 11.5px; fill: var(--muted); }
+  svg .t-b { font-weight: 600; font-size: 14px; }
+  svg .t-w { fill: #fff; }
+  svg .box { stroke-width: 1.5; rx: 8; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 12px; }
+  .grid .card { margin: 0; }
+  .grid h4 { margin: 0 0 6px; font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; background: var(--card); font-size: 14px; margin-top: 12px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--gray-bg); }
+  code { background: var(--gray-bg); padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+  ul { margin: 6px 0; padding-left: 22px; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; margin-right: 4px; }
+  .tag.b { background: var(--blue-bg); color: var(--blue); }
+  .tag.g { background: var(--green-bg); color: var(--green); }
+  .tag.o { background: var(--orange-bg); color: var(--orange); }
+  .tag.p { background: var(--purple-bg); color: var(--purple); }
+  .tag.r { background: var(--red-bg); color: var(--red); }
+  .note { border-left: 4px solid var(--orange); background: var(--orange-bg); padding: 10px 14px; border-radius: 6px; margin-top: 12px; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nex_bot 架构总览</h1>
+  <p>账号制云端 Core + 多端瘦客户端 + 本机设备执行器。派生自 OpenMausBot，生成于 2026-11-03。依据目录结构、构建脚本和 <code>docs/plans</code> 方案文档，未逐个模块读代码。</p>
+</header>
+<nav>
+  <a href="#overview">1 总体架构</a>
+  <a href="#core">2 Core 内部</a>
+  <a href="#chat">3 一次对话的流程</a>
+  <a href="#device">4 设备执行</a>
+  <a href="#clients">5 客户端</a>
+  <a href="#release">6 发布链路</a>
+  <a href="#upstream">7 与上游对比</a>
+  <a href="#cli">8 本机 CLI 方案</a>
+</nav>
+<main>
+
+<!-- ============ 1 ============ -->
+<section id="overview">
+  <h2>1 总体架构</h2>
+  <p class="sub">四层：客户端 → Core → 外部服务 / 设备。Core 是唯一的业务中心，客户端不保存业务逻辑。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 1040 640" role="img" aria-label="总体架构图">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5d6677"/></marker>
+    </defs>
+
+    <!-- clients -->
+    <text x="20" y="24" class="t-b">客户端层（瘦壳）</text>
+    <rect class="box" x="20" y="34" width="170" height="64" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="105" y="62" text-anchor="middle" class="t-b">网页版</text><text x="105" y="82" text-anchor="middle" class="t-sm">React 19 + Vite</text>
+    <rect class="box" x="210" y="34" width="190" height="64" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="305" y="62" text-anchor="middle" class="t-b">Windows</text><text x="305" y="82" text-anchor="middle" class="t-sm">Electron 便携版 EXE</text>
+    <rect class="box" x="420" y="34" width="190" height="64" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="515" y="62" text-anchor="middle" class="t-b">Mac</text><text x="515" y="82" text-anchor="middle" class="t-sm">原生 SwiftUI</text>
+    <rect class="box" x="630" y="34" width="190" height="64" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="725" y="62" text-anchor="middle" class="t-b">iPhone</text><text x="725" y="82" text-anchor="middle" class="t-sm">原生 SwiftUI（IPA）</text>
+    <rect class="box" x="840" y="34" width="180" height="64" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="930" y="62" text-anchor="middle" class="t-b">Android</text><text x="930" y="82" text-anchor="middle" class="t-sm">Kotlin（APK）</text>
+
+    <!-- arrows to core -->
+    <line x1="105" y1="98" x2="105" y2="168" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="305" y1="98" x2="305" y2="168" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="515" y1="98" x2="515" y2="168" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="725" y1="98" x2="725" y2="168" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="930" y1="98" x2="930" y2="168" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <text x="520" y="140" class="t-sm" text-anchor="middle" dx="200">HTTPS / WebSocket，登录会话最长 7 天，可刷新</text>
+
+    <!-- core -->
+    <rect x="20" y="170" width="1000" height="300" rx="12" fill="#e3f6ec" stroke="#1b8a5a" stroke-width="2"/>
+    <text x="40" y="196" class="t-b">Core（东京服务器 · systemd 服务 nexbot-core · server/personal-os）</text>
+
+    <rect class="box" x="40" y="212" width="220" height="100" fill="#fff" stroke="#1b8a5a"/>
+    <text x="150" y="236" text-anchor="middle" class="t-b">账号与工作区</text>
+    <text x="150" y="258" text-anchor="middle" class="t-sm">identity · workspaces · clients</text>
+    <text x="150" y="276" text-anchor="middle" class="t-sm">会话校验 · 设备登记</text>
+    <text x="150" y="294" text-anchor="middle" class="t-sm">失败即拒绝（fail closed）</text>
+
+    <rect class="box" x="280" y="212" width="220" height="100" fill="#fff" stroke="#1b8a5a"/>
+    <text x="390" y="236" text-anchor="middle" class="t-b">对话与 Agent 执行</text>
+    <text x="390" y="258" text-anchor="middle" class="t-sm">runtime.ts 调度</text>
+    <text x="390" y="276" text-anchor="middle" class="t-sm">worker.ts（Pi agent 子进程）</text>
+    <text x="390" y="294" text-anchor="middle" class="t-sm">projection · compaction</text>
+
+    <rect class="box" x="520" y="212" width="220" height="100" fill="#fff" stroke="#1b8a5a"/>
+    <text x="630" y="236" text-anchor="middle" class="t-b">记忆</text>
+    <text x="630" y="258" text-anchor="middle" class="t-sm">memory · core-memory · topic-tree</text>
+    <text x="630" y="276" text-anchor="middle" class="t-sm">retrieval · embeddings</text>
+    <text x="630" y="294" text-anchor="middle" class="t-sm">外部记忆插件（Hindsight）</text>
+
+    <rect class="box" x="760" y="212" width="240" height="100" fill="#fff" stroke="#1b8a5a"/>
+    <text x="880" y="236" text-anchor="middle" class="t-b">产品功能</text>
+    <text x="880" y="258" text-anchor="middle" class="t-sm">todos · routines（例行任务）</text>
+    <text x="880" y="276" text-anchor="middle" class="t-sm">skills · connectors（Gmail/飞书/MCP）</text>
+    <text x="880" y="294" text-anchor="middle" class="t-sm">image-models</text>
+
+    <rect class="box" x="40" y="330" width="220" height="120" fill="#fff" stroke="#1b8a5a"/>
+    <text x="150" y="354" text-anchor="middle" class="t-b">模型层</text>
+    <text x="150" y="376" text-anchor="middle" class="t-sm">model-catalog（models.dev）</text>
+    <text x="150" y="394" text-anchor="middle" class="t-sm">model-limits · calibration</text>
+    <text x="150" y="412" text-anchor="middle" class="t-sm">model-errors</text>
+    <text x="150" y="430" text-anchor="middle" class="t-sm">模型凭据只留在服务端</text>
+
+    <rect class="box" x="280" y="330" width="220" height="120" fill="#fff" stroke="#1b8a5a"/>
+    <text x="390" y="354" text-anchor="middle" class="t-b">权限与审批</text>
+    <text x="390" y="376" text-anchor="middle" class="t-sm">policy · risk · approval-rules</text>
+    <text x="390" y="394" text-anchor="middle" class="t-sm">按“效果”分级</text>
+    <text x="390" y="412" text-anchor="middle" class="t-sm">读取/存文档自动通过</text>
+    <text x="390" y="430" text-anchor="middle" class="t-sm">危险操作需审批</text>
+
+    <rect class="box" x="520" y="330" width="220" height="120" fill="#fff" stroke="#1b8a5a"/>
+    <text x="630" y="354" text-anchor="middle" class="t-b">存储</text>
+    <text x="630" y="376" text-anchor="middle" class="t-sm">store.ts + *-schema.sql</text>
+    <text x="630" y="394" text-anchor="middle" class="t-sm">服务器本地数据目录</text>
+    <text x="630" y="412" text-anchor="middle" class="t-sm">一个数据目录一个写入者</text>
+    <text x="630" y="430" text-anchor="middle" class="t-sm">（PID/nonce 锁）</text>
+
+    <rect class="box" x="760" y="330" width="240" height="120" fill="#fff" stroke="#1b8a5a"/>
+    <text x="880" y="354" text-anchor="middle" class="t-b">分发</text>
+    <text x="880" y="376" text-anchor="middle" class="t-sm">client-updates（更新清单，5 分钟重读）</text>
+    <text x="880" y="394" text-anchor="middle" class="t-sm">client-downloads（下载清单）</text>
+    <text x="880" y="412" text-anchor="middle" class="t-sm">网页界面静态资源</text>
+
+    <!-- bottom -->
+    <line x1="260" y1="470" x2="170" y2="540" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="520" y1="470" x2="520" y2="540" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="780" y1="470" x2="860" y2="540" stroke="#5d6677" stroke-width="1.5" marker-end="url(#a)"/>
+
+    <rect class="box" x="20" y="540" width="300" height="84" fill="#f0eaff" stroke="#7a4fd0"/>
+    <text x="170" y="566" text-anchor="middle" class="t-b">nex_user 用户中心</text>
+    <text x="170" y="586" text-anchor="middle" class="t-sm">user.nexorai.com.cn</text>
+    <text x="170" y="604" text-anchor="middle" class="t-sm">账号、密码、状态的唯一来源</text>
+
+    <rect class="box" x="370" y="540" width="300" height="84" fill="#fff0e1" stroke="#c8641a"/>
+    <text x="520" y="566" text-anchor="middle" class="t-b">模型服务商 / 外部记忆</text>
+    <text x="520" y="586" text-anchor="middle" class="t-sm">用户配置的模型 endpoint</text>
+    <text x="520" y="604" text-anchor="middle" class="t-sm">记忆插件自带数据库和模型</text>
+
+    <rect class="box" x="720" y="540" width="300" height="84" fill="#eceef3" stroke="#5d6677"/>
+    <text x="870" y="566" text-anchor="middle" class="t-b">设备执行器（DCP）</text>
+    <text x="870" y="586" text-anchor="middle" class="t-sm">用户电脑 / 独立设备节点</text>
+    <text x="870" y="604" text-anchor="middle" class="t-sm">文件 · 命令 · 窗口操作</text>
+  </svg>
+  </div>
+  <div class="note">核心决策（<code>core-service-thin-shell.md</code>）：主设备不再是 Electron 应用，而是一个后端部署；所有桌面包都是同一种“瘦壳”，没有 Core、worker、本地数据库或 UI 业务包，关闭客户端不会影响 Core。</div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section id="core">
+  <h2>2 Core 内部模块</h2>
+  <p class="sub">位于 <code>server/personal-os/</code>，约 680 个文件（含测试）。</p>
+  <div class="grid">
+    <div class="card"><h4><span class="tag g">身份</span>账号与工作区</h4>
+      <ul><li><code>identity*.ts</code>、<code>identity-schema.sql</code></li><li><code>workspaces.ts</code>：账号工作区，Core ID 稳定</li><li><code>clients.ts</code> / <code>devices.ts</code>：登录设备</li><li>对接 nex_user，业务/任务/工具边界反复校验</li></ul></div>
+    <div class="card"><h4><span class="tag b">执行</span>Agent 运行</h4>
+      <ul><li><code>runtime.ts</code>：fork worker，按助手限制并发，给后台维护留一个空位</li><li><code>worker.ts</code>：基于 <code>@earendil-works/pi-coding-agent</code></li><li><code>contracts.ts</code>：Core 与 worker 的消息协议</li><li><code>tool-catalog.ts</code>：常用工具 + 按需发现</li></ul></div>
+    <div class="card"><h4><span class="tag p">上下文</span>对话与压缩</h4>
+      <ul><li><code>projection*.ts</code>：对话投影</li><li><code>episodes*.ts</code>、<code>context-tools.ts</code></li><li><code>compaction-*.ts</code>：压缩时机与失败处理</li><li><code>conversation-search</code>：对话检索</li></ul></div>
+    <div class="card"><h4><span class="tag o">记忆</span>多层记忆</h4>
+      <ul><li><code>memory*.ts</code>、<code>core-memory.ts</code></li><li><code>topic-tree*</code>、<code>topic-access*</code>：话题树与访问隔离</li><li><code>retrieval*</code>、<code>embeddings</code>、<code>rerank</code></li><li><code>hindsight.ts</code>：外部记忆插件</li></ul></div>
+    <div class="card"><h4><span class="tag g">功能</span>产品能力</h4>
+      <ul><li><code>todos*</code>：待办，可交给助手并验收</li><li><code>routines*</code>：例行任务，独立执行</li><li><code>skills.ts</code>、<code>connectors*</code></li><li><code>gmail-*</code>、<code>feishu</code></li></ul></div>
+    <div class="card"><h4><span class="tag r">安全</span>策略与审批</h4>
+      <ul><li><code>policy.ts</code>：<code>evaluateTool</code> 判定</li><li><code>risk.ts</code>、<code>approval-rules.ts</code></li><li><code>broker-tool.ts</code>：worker 的审批代理工具</li><li>可记住的审批规则</li></ul></div>
+  </div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section id="chat">
+  <h2>3 一次对话的流程</h2>
+  <p class="sub">根据 runtime / worker / policy / node 的职责推演，用于理解各模块的衔接；个别步骤的细节以代码为准。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 1040 560" role="img" aria-label="对话时序图">
+    <defs>
+      <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f6fed"/></marker>
+      <marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1b8a5a"/></marker>
+    </defs>
+    <!-- lifelines -->
+    <g font-size="13">
+      <rect class="box" x="20" y="10" width="120" height="40" fill="#e8f0ff" stroke="#2f6fed"/><text x="80" y="35" text-anchor="middle" class="t-b">客户端</text>
+      <rect class="box" x="230" y="10" width="140" height="40" fill="#e3f6ec" stroke="#1b8a5a"/><text x="300" y="35" text-anchor="middle" class="t-b">Core</text>
+      <rect class="box" x="460" y="10" width="140" height="40" fill="#e3f6ec" stroke="#1b8a5a"/><text x="530" y="35" text-anchor="middle" class="t-b">worker</text>
+      <rect class="box" x="690" y="10" width="140" height="40" fill="#fdeceb" stroke="#c0392b"/><text x="760" y="35" text-anchor="middle" class="t-b">策略 / 审批</text>
+      <rect class="box" x="900" y="10" width="120" height="40" fill="#eceef3" stroke="#5d6677"/><text x="960" y="35" text-anchor="middle" class="t-b">设备执行器</text>
+    </g>
+    <g stroke="#b7bfce" stroke-dasharray="4 4">
+      <line x1="80" y1="50" x2="80" y2="540"/><line x1="300" y1="50" x2="300" y2="540"/><line x1="530" y1="50" x2="530" y2="540"/><line x1="760" y1="50" x2="760" y2="540"/><line x1="960" y1="50" x2="960" y2="540"/>
+    </g>
+
+    <g font-size="12.5">
+      <line x1="80" y1="86" x2="298" y2="86" stroke="#2f6fed" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="90" y="80">① 发送消息（带登录会话）</text>
+
+      <line x1="300" y1="118" x2="528" y2="118" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="310" y="112">② 校验账号 · 取记忆 · 拼上下文，fork worker</text>
+
+      <path d="M530,146 q40,0 40,16 q0,16 -40,16" fill="none" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="578" y="166">③ 调用模型（凭据在服务端）</text>
+
+      <line x1="530" y1="204" x2="298" y2="204" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="318" y="198">④ 模型要调用工具 → 回报 Core</text>
+
+      <line x1="300" y1="236" x2="758" y2="236" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="400" y="230">⑤ evaluateTool：按“效果”判定风险</text>
+
+      <line x1="758" y1="268" x2="82" y2="268" stroke="#c0392b" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="170" y="262" fill="#c0392b">⑥ 需要审批 → 客户端出现审批卡片（普通读取则跳过 ⑥⑦）</text>
+
+      <line x1="80" y1="300" x2="758" y2="300" stroke="#2f6fed" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="300" y="294">⑦ 用户允许 / 拒绝（可记住规则）</text>
+
+      <line x1="300" y1="340" x2="958" y2="340" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="520" y="334">⑧ 经 DCP 下发：读文件 / 运行命令 / 窗口操作</text>
+
+      <line x1="958" y1="372" x2="302" y2="372" stroke="#5d6677" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="520" y="366">⑨ 返回 stdout、stderr（有长度上限）</text>
+
+      <line x1="300" y1="406" x2="532" y2="406" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="316" y="400">⑩ 结果交回 worker，继续推理</text>
+
+      <line x1="530" y1="440" x2="302" y2="440" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="326" y="434">⑪ 流式回复文本</text>
+
+      <line x1="300" y1="472" x2="82" y2="472" stroke="#2f6fed" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="110" y="466">⑫ 推送到所有登录设备</text>
+
+      <path d="M300,500 q-40,0 -40,14 q0,14 40,14" fill="none" stroke="#1b8a5a" stroke-width="1.5" marker-end="url(#c)"/>
+      <text x="320" y="518">⑬ 落库 · 后台压缩 / 记忆维护（空闲时）</text>
+    </g>
+  </svg>
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section id="device">
+  <h2>4 设备执行（DCP）</h2>
+  <p class="sub">来自 <code>docs/verification/client-device-executor.md</code>。命令在用户电脑上执行，但助手本身跑在 Core。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 1040 330" role="img" aria-label="设备执行流程">
+    <defs><marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5d6677"/></marker></defs>
+    <rect class="box" x="20" y="20" width="200" height="90" fill="#e8f0ff" stroke="#2f6fed"/>
+    <text x="120" y="48" text-anchor="middle" class="t-b">① 用户登录客户端</text>
+    <text x="120" y="70" text-anchor="middle" class="t-sm">无首次授权弹窗</text>
+    <text x="120" y="88" text-anchor="middle" class="t-sm">自动注册这台电脑</text>
+
+    <rect class="box" x="270" y="20" width="220" height="90" fill="#e3f6ec" stroke="#1b8a5a"/>
+    <text x="380" y="48" text-anchor="middle" class="t-b">② Core 记录设备</text>
+    <text x="380" y="70" text-anchor="middle" class="t-sm">/api/clients · 90 秒心跳判断在线</text>
+    <text x="380" y="88" text-anchor="middle" class="t-sm">client-node.ts 包装 DeviceNode</text>
+
+    <rect class="box" x="540" y="20" width="220" height="90" fill="#eceef3" stroke="#5d6677"/>
+    <text x="650" y="48" text-anchor="middle" class="t-b">③ 设备执行器运行</text>
+    <text x="650" y="70" text-anchor="middle" class="t-sm">electron/nex-client-device.mjs</text>
+    <text x="650" y="88" text-anchor="middle" class="t-sm">Mac：Executor/executor-host.mjs</text>
+
+    <rect class="box" x="810" y="20" width="210" height="90" fill="#fdeceb" stroke="#c0392b"/>
+    <text x="915" y="48" text-anchor="middle" class="t-b">④ 工具调用</text>
+    <text x="915" y="70" text-anchor="middle" class="t-sm">文件读取 · 命令运行</text>
+    <text x="915" y="88" text-anchor="middle" class="t-sm">窗口操作（仅 Windows）</text>
+
+    <line x1="220" y1="65" x2="268" y2="65" stroke="#5d6677" stroke-width="1.5" marker-end="url(#d)"/>
+    <line x1="490" y1="65" x2="538" y2="65" stroke="#5d6677" stroke-width="1.5" marker-end="url(#d)"/>
+    <line x1="760" y1="65" x2="808" y2="65" stroke="#5d6677" stroke-width="1.5" marker-end="url(#d)"/>
+
+    <text x="20" y="160" class="t-b">生命周期</text>
+    <rect class="box" x="20" y="172" width="240" height="130" fill="#fff" stroke="#b7bfce"/>
+    <text x="140" y="196" text-anchor="middle" class="t-b">暂停 / 恢复</text>
+    <text x="140" y="218" text-anchor="middle" class="t-sm">仅当前设备那一行有按钮</text>
+    <text x="140" y="236" text-anchor="middle" class="t-sm">暂停后停止运行，重启仍保持</text>
+    <text x="140" y="254" text-anchor="middle" class="t-sm">直到用户点击恢复</text>
+
+    <rect class="box" x="280" y="172" width="240" height="130" fill="#fff" stroke="#b7bfce"/>
+    <text x="400" y="196" text-anchor="middle" class="t-b">退出 / 登出</text>
+    <text x="400" y="218" text-anchor="middle" class="t-sm">退出：断开并停止自己启动的命令</text>
+    <text x="400" y="236" text-anchor="middle" class="t-sm">登出：额外撤销设备</text>
+    <text x="400" y="254" text-anchor="middle" class="t-sm">远程撤销后不会静默重建</text>
+
+    <rect class="box" x="540" y="172" width="240" height="130" fill="#fff" stroke="#b7bfce"/>
+    <text x="660" y="196" text-anchor="middle" class="t-b">会话检查</text>
+    <text x="660" y="218" text-anchor="middle" class="t-sm">主进程每 15 秒检查一次</text>
+    <text x="660" y="236" text-anchor="middle" class="t-sm">401/403 关闭执行器</text>
+    <text x="660" y="254" text-anchor="middle" class="t-sm">到期前 30 分钟内自动刷新令牌</text>
+
+    <rect class="box" x="800" y="172" width="220" height="130" fill="#fff0e1" stroke="#c8641a"/>
+    <text x="910" y="196" text-anchor="middle" class="t-b">边界（注意）</text>
+    <text x="910" y="218" text-anchor="middle" class="t-sm">命令以当前系统用户运行</text>
+    <text x="910" y="236" text-anchor="middle" class="t-sm">用户主目录只是读取边界</text>
+    <text x="910" y="254" text-anchor="middle" class="t-sm">不是命令沙箱</text>
+  </svg>
+  </div>
+  <div class="card"><b>这条通道的特点：</b>一次命令对应一次结果返回（stdout 约 50KB、stderr 约 10KB 的截断，见 <code>node.ts</code>），没有长连接的事件流。所以它适合“让助手执行命令”，不适合直接承载另一个 agent CLI 的对话流（见第 8 节）。</div>
+</section>
+
+<!-- ============ 5 ============ -->
+<section id="clients">
+  <h2>5 客户端</h2>
+  <table>
+    <tr><th>端</th><th>目录</th><th>技术</th><th>设备执行</th><th>分发</th></tr>
+    <tr><td>网页</td><td><code>src/</code>、<code>personal.html</code></td><td>React 19 + Vite + Tailwind</td><td>否</td><td>Core 直接提供</td></tr>
+    <tr><td>Windows</td><td><code>electron/</code>、<code>electron-builder.client.yml</code></td><td>Electron，界面从 Core 加载，也打包进安装包</td><td>文件、命令、窗口操作</td><td>便携版 EXE，未签名</td></tr>
+    <tr><td>Mac</td><td><code>apps/apple/NexBotMac</code>、<code>Executor</code></td><td>原生 SwiftUI + Node 执行器</td><td>文件、命令（不支持窗口）</td><td>DMG，临时签名，未公证</td></tr>
+    <tr><td>iPhone</td><td><code>apps/apple/NexBotiOS</code></td><td>原生 SwiftUI</td><td>否（不控制手机）</td><td>未签名 IPA，AltStore 重签</td></tr>
+    <tr><td>Android</td><td><code>android/app</code>、<code>android/core</code></td><td>Kotlin，内置网页界面，WebRTC Live 通话</td><td>否</td><td>调试签名 APK</td></tr>
+  </table>
+  <p class="sub">Apple 两端共享 <code>apps/apple/Shared</code> 和 <code>Packages/NexClientKit</code>。界面行为变化时，Web 与 Apple 原生两套都要改（AGENTS.md 要求）。</p>
+</section>
+
+<!-- ============ 6 ============ -->
+<section id="release">
+  <h2>6 发布链路</h2>
+  <p class="sub">规则见 <code>AGENTS.md</code>：只能从已推送到 origin 的 <code>main</code> 提交构建和部署。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 1040 250" role="img" aria-label="发布链路">
+    <defs><marker id="e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5d6677"/></marker></defs>
+    <g font-size="12.5">
+      <rect class="box" x="10" y="20" width="150" height="80" fill="#e8f0ff" stroke="#2f6fed"/><text x="85" y="46" text-anchor="middle" class="t-b">1 源码</text><text x="85" y="66" text-anchor="middle" class="t-sm">合并 main 并推送</text><text x="85" y="82" text-anchor="middle" class="t-sm">推送前复查 origin</text>
+      <rect class="box" x="185" y="20" width="150" height="80" fill="#e3f6ec" stroke="#1b8a5a"/><text x="260" y="46" text-anchor="middle" class="t-b">2 Core + Web</text><text x="260" y="66" text-anchor="middle" class="t-sm">build-personal --core</text><text x="260" y="82" text-anchor="middle" class="t-sm">东京 release 目录切换</text>
+      <rect class="box" x="360" y="20" width="150" height="80" fill="#fff0e1" stroke="#c8641a"/><text x="435" y="46" text-anchor="middle" class="t-b">3 受影响客户端</text><text x="435" y="66" text-anchor="middle" class="t-sm">Web / Windows / Android</text><text x="435" y="82" text-anchor="middle" class="t-sm">Mac、iOS 经 ssh mac-air</text>
+      <rect class="box" x="535" y="20" width="150" height="80" fill="#f0eaff" stroke="#7a4fd0"/><text x="610" y="46" text-anchor="middle" class="t-b">4 打包</text><text x="610" y="66" text-anchor="middle" class="t-sm">各端 bump 版本号</text><text x="610" y="82" text-anchor="middle" class="t-sm">校验产物与签名</text>
+      <rect class="box" x="710" y="20" width="150" height="80" fill="#e8f0ff" stroke="#2f6fed"/><text x="785" y="46" text-anchor="middle" class="t-b">5 发布</text><text x="785" y="66" text-anchor="middle" class="t-sm">GitHub 预发布</text><text x="785" y="82" text-anchor="middle" class="t-sm">OSS 镜像 + 更新清单</text>
+      <rect class="box" x="885" y="20" width="145" height="80" fill="#e3f6ec" stroke="#1b8a5a"/><text x="957" y="46" text-anchor="middle" class="t-b">6 记录</text><text x="957" y="66" text-anchor="middle" class="t-sm">README + 官网主页</text><text x="957" y="82" text-anchor="middle" class="t-sm">docs/verification</text>
+    </g>
+    <g stroke="#5d6677" stroke-width="1.5" marker-end="url(#e)">
+      <line x1="160" y1="60" x2="183" y2="60"/><line x1="335" y1="60" x2="358" y2="60"/><line x1="510" y1="60" x2="533" y2="60"/><line x1="685" y1="60" x2="708" y2="60"/><line x1="860" y1="60" x2="883" y2="60"/>
+    </g>
+    <text x="10" y="140" class="t-b">关键保护</text>
+    <g font-size="12.5">
+      <text x="10" y="164">• 部署前确认没有活动任务；备份数据到 /data/nexbot/backups/&lt;release&gt;-pre；systemd drop-in 切换，任一检查失败自动回滚。</text>
+      <text x="10" y="186">• 先在一次性 Core 中验证新 release；上线后核对 HTML 与资源逐字节一致、/health 为 200、未授权 API 返回 401。</text>
+      <text x="10" y="208">• 客户端靠比较版本号更新，已发布的版本号和文件名不得被覆盖；更新清单旧版本私下保留以便回滚。</text>
+      <text x="10" y="230">• Mac / iOS 在用户的 Mac 上用全新 clone 构建，建专用模拟器，用完删除。</text>
+    </g>
+  </svg>
+  </div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section id="upstream">
+  <h2>7 与上游 OpenMausBot 的关系</h2>
+  <table>
+    <tr><th>维度</th><th>OpenMausBot（上游）</th><th>nex_bot</th></tr>
+    <tr><td>agent 在哪里跑</td><td>用户本机，起 claude / codex / grok CLI 子进程</td><td>服务器 Core 里的 Pi worker</td></tr>
+    <tr><td>模型登录</td><td>复用本机 CLI 的登录</td><td>服务端持有模型凭据</td></tr>
+    <tr><td>账号</td><td>本地为主，可选组织登录</td><td>nex_user 账号制，多设备同步</td></tr>
+    <tr><td>客户端</td><td>Electron（Mac、Windows、Ubuntu）+ 命令行 + 手机网页</td><td>网页 + Windows + 原生 Mac/iOS + Android</td></tr>
+    <tr><td>本机能力</td><td>harness 直接管理 agent 进程与权限 broker</td><td>设备执行器按需执行命令</td></tr>
+    <tr><td>遗留代码</td><td colspan="2"><code>server/drivers/</code>、<code>server/harness/</code>、<code>companion/</code>、<code>cloudflare/</code>、<code>enterprise/</code> 仍在仓库中，瘦壳架构不走这条主路径（是否线上使用未核实）</td></tr>
+  </table>
+</section>
+
+<!-- ============ 8 ============ -->
+<section id="cli">
+  <h2>8 让 nex_bot 操作本机 CLI 的方案（历史快照）</h2>
+  <p class="sub">本节保留 2026-11-03 的方案记录。当前已通过设备端 <code>device.agent</code> 实现 Codex 和 Claude CLI 的发现、启动、续接、审批和停止，支持 Windows 与 macOS；实现和验证见 <a href="../verification/local-agent-cli.md">本机 Agent CLI 验证记录</a>。</p>
+  <p class="sub">上游做法：每个 CLI 一个 driver，起子进程并通过 stdio 通信；用 broker 转发权限审批。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 1040 330" role="img" aria-label="CLI 方案对比">
+    <defs><marker id="f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7a4fd0"/></marker></defs>
+    <text x="20" y="22" class="t-b">方案 A（推荐）：driver 搬到设备端，Core 经 DCP 驱动</text>
+    <rect class="box" x="20" y="36" width="200" height="70" fill="#e3f6ec" stroke="#1b8a5a"/><text x="120" y="62" text-anchor="middle" class="t-b">Core</text><text x="120" y="82" text-anchor="middle" class="t-sm">助手 · 对话 · 审批</text>
+    <rect class="box" x="300" y="36" width="260" height="70" fill="#f0eaff" stroke="#7a4fd0"/><text x="430" y="62" text-anchor="middle" class="t-b">DCP 新增：长会话通道</text><text x="430" y="82" text-anchor="middle" class="t-sm">回合下发 · 事件流 · 审批往返</text>
+    <rect class="box" x="640" y="36" width="190" height="70" fill="#eceef3" stroke="#5d6677"/><text x="735" y="62" text-anchor="middle" class="t-b">设备端 driver</text><text x="735" y="82" text-anchor="middle" class="t-sm">claude / codex / ACP</text>
+    <rect class="box" x="880" y="36" width="140" height="70" fill="#fff" stroke="#5d6677"/><text x="950" y="62" text-anchor="middle" class="t-b">本机 CLI</text><text x="950" y="82" text-anchor="middle" class="t-sm">用本机登录</text>
+    <g stroke="#7a4fd0" stroke-width="1.5" marker-end="url(#f)"><line x1="220" y1="71" x2="298" y2="71"/><line x1="560" y1="71" x2="638" y2="71"/><line x1="830" y1="71" x2="878" y2="71"/></g>
+    <g font-size="12.5">
+      <text x="20" y="136">• 复用 server/drivers/claude.ts（stream-json + --resume）、codex.ts（app-server JSON-RPC）、acp/</text>
+      <text x="20" y="158">• 审批沿用 Core 现有流程：CLI 的授权请求 → 设备端 broker → DCP → Core → 客户端卡片</text>
+      <text x="20" y="180">• 工作量：DCP 协议扩展 + Electron 设备端接入 + Mac 原生端用 Swift/Node 执行器实现</text>
+      <text x="20" y="202">• 限制：仅桌面设备可用，电脑必须在线；手机和网页通过 Core 间接使用</text>
+    </g>
+    <text x="20" y="240" class="t-b">方案 B：整个 harness 放进桌面客户端 —— 回到上游模式，与瘦壳架构冲突，不建议</text>
+    <text x="20" y="266" class="t-b">方案 C：助手用 shell 工具直接跑 <tspan font-family="monospace">claude -p</tspan> —— 现在就能试，但无流式、无会话续接、无审批卡片</text>
+    <text x="20" y="300" class="t-sm">权衡：A 体验完整、改动较大；C 最快，适合先验证需求。</text>
+  </svg>
+  </div>
+</section>
+
+</main>
+<footer>nex_bot 架构总览 · docs/architecture/nex-bot-architecture.html</footer>
+</body>
+</html>

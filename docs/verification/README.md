@@ -1,5 +1,7 @@
 # Verifying OpenMausBot
 
+- [自有分支整理与隔离验证（2026-11-07）](branch-consolidation-20261107.md)
+
 - [Local Agent CLI: macOS follow-up verification (2026-11-06)](local-agent-cli-macos-followup-20261106.md)
 
 - [Local Agent CLI: Windows fixes and verification (2026-11-06)](local-agent-cli-windows-20261106.md)
