@@ -107,8 +107,9 @@ it("never starts after immediate cancellation or executor shutdown", async () =>
 
 it("keeps a nested Claude agent's session, output and completion separate from the active parent", async () => {
   const f = fixture(), run = await f.start("claude", "synthetic subagent hold");
-  const status = await f.until(run.sessionId, "running");
+  await f.until(run.sessionId, "running");
   await vi.waitFor(async () => expect((await f.status(run.sessionId)).events.some((event) => event.text.includes("你好"))).toBe(true));
+  const status = await f.status(run.sessionId);
   expect(status.nativeSessionId).toBe("synthetic-native-session");
   expect((await f.status(run.sessionId)).events.some((event) => event.text.includes("CHILD-ONLY"))).toBe(false);
   await f.call("send", { sessionId: run.sessionId, prompt: "synthetic finish parent" });

@@ -28,9 +28,19 @@ async function launch() {
   const instance = { child, exited: false, ws: undefined, sequence: 0, replies: new Map(), logs: "" }; instances.push(instance);
   child.once("close", () => { instance.exited = true; });
   child.stdout.on("data", (raw) => { instance.logs = (instance.logs + raw).slice(-4000); }); child.stderr.on("data", (raw) => { instance.logs = (instance.logs + raw).slice(-4000); });
-  await until(() => { if (instance.exited) throw new Error(instance.logs); return existsSync(readyFile) && existsSync(path.join(profile, "DevToolsActivePort")); }, 120_000);
-  const port = readFileSync(path.join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
-  const target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((item) => item.type === "page");
+  let target;
+  await until(async () => {
+    if (instance.exited) throw new Error("Fixture shell exited: " + instance.logs);
+    if (!existsSync(readyFile) || JSON.parse(readFileSync(readyFile, "utf8")).pid !== child.pid) return false;
+    // Chromium can leave a stale DevToolsActivePort across a profile restart.
+    // Use the endpoint announced by this child, and wait for its page target.
+    const endpoint = /DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/\S+)/.exec(instance.logs)?.[1];
+    if (!endpoint) return false;
+    try {
+      target = (await (await fetch(`http://127.0.0.1:${new URL(endpoint).port}/json/list`)).json()).find((item) => item.type === "page");
+      return !!target;
+    } catch { return false; }
+  }, 120_000);
   instance.ws = new WebSocket(target.webSocketDebuggerUrl); await new Promise((resolve) => instance.ws.once("open", resolve));
   instance.webLoginFrames = 0;
   instance.ws.on("message", (raw) => { const event = JSON.parse(raw.toString()); if (event.method === "Runtime.bindingCalled" && event.params.name === "fixtureWebLoginShown") instance.webLoginFrames++; const pending = instance.replies.get(event.id); if (!pending) return; instance.replies.delete(event.id); if (event.error) pending.reject(new Error(event.error.message)); else pending.resolve(event.result); });
@@ -219,7 +229,7 @@ try {
     cases.push("new-account-empty-workspace", "second-account-restart", "account-switch-isolation", "legacy-owner-contacts-preserved");
   }
   console.log(JSON.stringify({ passed: true, cases, packaged: !!executable, accountWorkspaces }));
-} catch (error) { console.error("Completed shell checks:", cases); console.error(await instances.at(-1)?.evaluate("({text:document.body.innerText,model:document.querySelector('input[name=model]')?.value,endpoint:document.querySelector('input[name=endpoint]')?.value})").catch(()=>null)); throw error; } finally {
+} catch (error) { console.error("Completed shell checks:", cases); console.error(await instances.at(-1)?.evaluate?.("({text:document.body.innerText,model:document.querySelector('input[name=model]')?.value,endpoint:document.querySelector('input[name=endpoint]')?.value})").catch(()=>null)); console.error("Fixture shell logs:", instances.at(-1)?.logs); throw error; } finally {
   for (const instance of instances) { instance.ws?.close(); if (!instance.exited) { instance.child.kill("SIGTERM"); await until(() => instance.exited).catch(() => instance.child.kill("SIGKILL")); } }
   await core.close(); await provider.close(); await catalogModel.close(); try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { console.warn("Owned fixture retained for cleanup:", root); }
 }

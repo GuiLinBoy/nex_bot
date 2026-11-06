@@ -2,10 +2,11 @@
 // inference only. Fresh homes/projects; no user's CLI login, config or data.
 import { createServer } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { localAgentEnvironment } from "../server/personal-os/local-agent-environment.ts";
+import { removeTempDir } from "../server/testing/cleanup.ts";
 import { createClientNode } from "../dist-personal/client-executor/client-node/client-node.js";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "nex-installed-agent-")), answer = "synthetic-local-agent-verified";
@@ -54,13 +55,16 @@ try {
     client.node.agents.options.environment = () => ({ ...localAgentEnvironment({ ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, ".codex"), CLAUDE_CONFIG_DIR: path.join(home, ".claude") }), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost", ...(agent === "claude" ? { ANTHROPIC_API_KEY: "synthetic-fixture-key", ANTHROPIC_BASE_URL: origin, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } : {}) });
     const context = { bindingId: "synthetic-core:synthetic-device", botId: "synthetic-bot", taskId: "synthetic-task", callId: randomUUID() };
     const first = await client.node.agents.execute(context, "start", { agent, cwd, prompt: "Return the fixture answer without using tools." });
+    let after = 0;
     const wait = async () => {
-      const deadline = Date.now() + 45_000; let after = 0, text = "";
+      const deadline = Date.now() + 45_000; let text = "";
       while (Date.now() < deadline) {
         const status = await client.node.agents.execute(context, "status", { sessionId: first.sessionId, after, waitMs: 1000 });
         after = status.nextCursor; text += status.events.map((event) => event.text).join("\n");
-        if (status.status === "completed" && !status.hasMore) { if (!text.includes(answer)) throw new Error(`${agent}: completion omitted output`); return status.nativeSessionId; }
+        if (status.status === "completed" && !status.hasMore && !client.node.agents.live.has(first.sessionId)) { if (!text.includes(answer)) throw new Error(`${agent}: completion omitted output`); return status.nativeSessionId; }
         if (["failed", "cancelled", "interrupted", "waiting"].includes(status.status)) throw new Error(`${agent}: ${status.status}: ${status.error ?? JSON.stringify(status.requests)}`);
+        // Completion also has to reap the owned process tree before a resume.
+        if (status.status === "completed") await new Promise((resolve) => setTimeout(resolve, 25));
       }
       throw new Error(`${agent}: fixture timeout; requests=${JSON.stringify(requests)}`);
     };
@@ -74,5 +78,5 @@ try {
 } finally {
   await client?.close();
   server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
-  rmSync(root, { recursive: true, force: true });
+  await removeTempDir(root);
 }

@@ -1,5 +1,7 @@
 # Verifying OpenMausBot
 
+- [Local Agent CLI: Windows fixes and verification (2026-11-06)](local-agent-cli-windows-20261106.md)
+
 - [Local Codex CLI / Claude Code on Windows and macOS (2026-11-06)](local-agent-cli.md)
 
 - [Five assistant appearances: release verification (2026-11-01)](q-avatar-release-20261101.md)

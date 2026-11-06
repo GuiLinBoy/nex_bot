@@ -324,8 +324,12 @@ export class LocalAgentSessions {
     live.finished = true; clearTimeout(live.timer); live.requests.clear();
     for (const pending of live.rpc.values()) { clearTimeout(pending.timer); pending.reject(new Error("CLI 会话已结束")); } live.rpc.clear();
     this.state(live.id, status, error);
-    live.child.stdin.end();
-    const stopping = killCliTree(live.child, 1000);
+    // Keep the launcher alive until taskkill /T has captured its descendants.
+    // Ending stdin first lets npm's Codex launcher exit before Windows can
+    // find the native app-server below it, leaving its pipes/files open.
+    // Windows tree enumeration can take over a second for a real CLI and its
+    // startup helpers. Use the shared bounded stop deadline before resuming.
+    const stopping = killCliTree(live.child);
     this.finishing.set(live.id, stopping);
     void stopping.then((stopped) => {
       if (this.live.get(live.id) === live) this.live.delete(live.id);

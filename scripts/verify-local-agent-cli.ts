@@ -1,10 +1,11 @@
 // Optional installed-CLI contract check. Uses a fresh home, sends initialize
 // only, never submits a prompt or reads the user's CLI account/configuration.
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execCli, killCliTree, spawnCli } from "../server/procs.ts";
 import { localAgentEnvironment } from "../server/personal-os/local-agent-environment.ts";
+import { removeTempDir } from "../server/testing/cleanup.ts";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "nex-cli-contract-"));
 const results: { agent: string; version?: string; initialized: boolean; stopped: boolean; error?: string }[] = [];
@@ -39,9 +40,9 @@ try {
       child.once("error", (error) => done(false, error.message)); child.once("close", (code) => done(false, `CLI exited before initialize (${code}): ${stderr}`));
       child.stdin.write(JSON.stringify(agent === "codex" ? { id: "nex-contract", method: "initialize", params: { clientInfo: { name: "nexbot_local_agent", title: "NexBot", version: "1.0.0" }, capabilities: {} } } : { type: "control_request", request_id: "nex-contract", request: { subtype: "initialize", hooks: {}, sdkMcpServers: [] } }) + "\n");
     });
-    child.stdin.end(); const stopped = await killCliTree(child, 1000);
+    const stopped = await killCliTree(child);
     results.push({ agent, version, initialized, stopped, ...(failure ? { error: failure } : {}) });
   }
   console.log(JSON.stringify({ isolated: true, inferenceSubmitted: false, results }, null, 2));
   if (results.some((result) => !result.initialized || !result.stopped)) process.exitCode = 1;
-} finally { rmSync(root, { recursive: true, force: true }); }
+} finally { await removeTempDir(root); }
