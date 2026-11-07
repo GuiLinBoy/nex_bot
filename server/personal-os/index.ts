@@ -33,12 +33,16 @@ import { ClientDownloadsSource, type ClientDownloadsOptions } from "./client-dow
 import { approvalRuleLabel, approvalRuleScope, approvalRules, revokeApprovalRule } from "./approval-rules.ts";
 import { ClientUpdateSource, type OssReleaseMirror } from "./client-updates.ts";
 import type { RetrievalDefaults } from "./retrieval-config.ts";
+import { loadAcceptanceOptions, type AcceptanceOptions } from './acceptance.ts';
+
+export interface AppOptions { acceptance?: AcceptanceOptions }
 
 export interface AppOptions { /** Server-wide defaults for memory retrieval models (from the environment); a user's own settings win. */ retrieval?: RetrievalDefaults; gmail?: GmailConfiguration; attachmentObjects?: AttachmentObjects; releaseMirror?: Pick<OssReleaseMirror, "manifest" | "signedUrl">; modelCatalog?: ModelCatalogConfig; clientDownloads?: ClientDownloadsOptions; accountWorkspaces?: boolean; publicCoreId?: string; serviceOrigin?: string; listen?: false; hostDevice?: false; dir: string; key: Buffer; token: string; port?: number; strictPort?: boolean; host?: string; publicOrigin?: string; /** Set only when a trusted local reverse proxy overwrites X-Forwarded-For with the real client address. */ trustProxy?: boolean; uiDir?: string; hindsight?: { endpoint: string; token: string }; memoryRuntime?: false; /** Only direct disposable test fixtures may opt out. Production service CLI never disables identity. */ identity?: false | { fixtureOrigin: string }; /** Only disposable test fixtures may inject a fake Feishu registration or transport. */ feishu?: { registerApp: RegisterAppFn; transport?: TransportFactory; fetchImpl?: typeof fetch } }
 
 export async function createPersonalApp(options: AppOptions) {
   if (options.publicOrigin) { const publicUrl = new URL(options.publicOrigin); if (publicUrl.protocol !== "https:" || publicUrl.username || publicUrl.password || publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash) throw new Error("公共 Core 地址须为 HTTPS 根地址"); }
   const store = new CoreStore(options.dir, options.key, options.token, options.modelCatalog);
+  store.acceptance.options = options.acceptance ?? loadAcceptanceOptions(options.dir);
   store.attachmentObjects = options.attachmentObjects;
   const clients = new ClientIdentity(store, options.publicCoreId), sync = new ClientSync(store);
   const downloads = new ClientDownloadsSource(options.clientDownloads), updates = new ClientUpdateSource(options.releaseMirror);
@@ -283,6 +287,58 @@ export async function createPersonalApp(options: AppOptions) {
     if (url.pathname.startsWith("/api/")) {
       const session = await authenticate(token);
       if (!session) { json(response, 401, { error: "Unauthorized" }); return; }
+      if (url.pathname.startsWith('/api/acceptance/')) {
+        if (session.user_id !== store.owner) { json(response, 403, { error: '此账号没有验收权限' }); return; }
+        if (request.method !== 'POST') { json(response, 405, { error: 'POST required' }); return; }
+        if (!request.headers['content-type']?.startsWith('application/json') || request.headers['sec-fetch-site'] === 'cross-site') { json(response, 403, { error: 'Invalid acceptance request' }); return; }
+        const data = await body(request);
+        const current = await authenticate(token);
+        if (!current || current.id !== session.id || current.user_id !== store.owner) { json(response, 401, { error: 'Unauthorized' }); return; }
+        const command = url.pathname.slice('/api/acceptance/'.length);
+        if (command === 'source-model') {
+          if (Object.keys(data).some(key => !['sourceName', 'deviceId'].includes(key))) throw new Error('验收元数据参数无效');
+          json(response, 200, store.acceptance.sourceModel(data.sourceName, data.deviceId)); return;
+        }
+        if (command === 'prepare') { const result = store.acceptance.prepare(data, botId => agents.ensure(botId)); changed(); json(response, 200, result); return; }
+        const scopeId = text(data.scopeId, 100);
+        store.acceptance.scope(scopeId);
+        if (command === 'status') { json(response, 200, store.acceptance.status(scopeId)); return; }
+        if (command === 'attach') {
+          if (Object.keys(data).some(key => !['scopeId', 'botId', 'name', 'data'].includes(key))) throw new Error('验收附件参数无效');
+          const botId = text(data.botId, 100);
+          store.acceptance.assertMember(scopeId, botId);
+          if (!store.acceptance.ready(botId)?.supportsImages) throw new Error('验收预算尚未覆盖图片输入');
+          const file = files.upload({ botId, name: data.name, data: data.data }, String(session.id));
+          if (!file.mime.startsWith('image/')) throw new Error('验收只接受图片附件');
+          await files.persist(file.id);
+          if (!(await authenticate(token))) { json(response, 401, { error: 'Unauthorized' }); return; }
+          json(response, 200, file); return;
+        }
+        if (command === 'send') {
+          if (Object.keys(data).some(key => !['scopeId', 'botId', 'clientId', 'text', 'attachments'].includes(key))) throw new Error('验收发送参数无效');
+          const botId = text(data.botId, 100);
+          store.acceptance.assertMember(scopeId, botId);
+          store.acceptance.ready(botId);
+          const attachments = data.attachments ?? [], clientId = text(data.clientId, 100);
+          const links = files.references(botId, attachments, String(session.id));
+          const content = text(`${typeof data.text === 'string' ? data.text.trim() : ''}${links ? '\n\n' + links : ''}`);
+          const result = store.transaction(() => { const sent = agents.send(botId, content, clientId, String(session.id)); files.bind(attachments as string[], botId, clientId); return sent; });
+          json(response, 202, result); return;
+        }
+        if (command === 'stop') {
+          if (data.taskId !== undefined) {
+            const taskId = text(data.taskId, 100), task = store.get('SELECT bot_id FROM tasks WHERE id=?', taskId);
+            if (!task) throw new Error('任务不存在');
+            store.acceptance.assertMember(scopeId, String(task.bot_id));
+            runtime.cancel(taskId);
+          } else {
+            store.run('UPDATE acceptance_scopes SET stopped=1 WHERE id=?', scopeId);
+            for (const task of store.all('SELECT t.id FROM tasks t JOIN acceptance_members m ON m.bot_id=t.bot_id WHERE m.scope_id=? AND t.ended_at IS NULL', scopeId)) runtime.cancel(String(task.id));
+          }
+          changed(); json(response, 200, { ok: true }); return;
+        }
+        json(response, 404, { error: 'Not found' }); return;
+      }
       if (url.pathname.startsWith("/api/connectors/") && session.user_id !== store.owner) { json(response, 403, { error: "此账号没有管理连接器的权限" }); return; }
       if (url.pathname === "/api/connectors/oauth/status" && request.method === "GET") { json(response, 200, connectors.oauth.status(text(url.searchParams.get("id"), 100), String(session.id))); return; }
       if (request.method === "GET" && url.pathname.startsWith("/api/attachments/")) {

@@ -4,6 +4,7 @@ export interface RuntimeInput { id: string; text: string; hash: string; seq: num
 // systemPrompt is the stable system message; volatilePrompt is injected per request before the newest model turn.
 export interface ModelPermit { invokeId: string; systemPrompt: string; volatilePrompt: string }
 export interface WorkerConfig {
+  acceptance?: true;
   // 'answer' (default) runs a task. 'maintain' only reduces the stored projection ahead of the next turn:
   // no input, no answering model, no tools; it saves through `snapshot`, reports `done` and exits. It has no task.
   mode?: "answer" | "maintain";
@@ -28,7 +29,7 @@ export interface WorkerConfig {
   history?: Array<{ref:string;role:string;content:string}>;
 }
 export interface WorkerEvent {
-  type: "request" | "tool" | "snapshot" | "delta" | "done" | "error" | "compact";
+  type: "request" | "dispatch" | "quota" | "tool" | "snapshot" | "delta" | "done" | "error" | "compact";
   requestId?: string; entries?: FileEntry[]; inputs?: string[];
   providerId?: string; entryId?: string; args?: Record<string, unknown>;
   text?: string; error?: string; inputTokens?: number; outputTokens?: number; invokeId?: string;
@@ -44,5 +45,7 @@ export interface WorkerEvent {
   cacheRead?: number; cacheWrite?: number;
   // The worker's own estimate of the request this receipt (inputTokens) belongs to.
   estimatedTokens?: number;
+  payload?: Record<string, unknown>;
+  quotaExceeded?: boolean;
 }
 export interface WorkerReply { type: "start" | "reply" | "steer" | "stop"; config?: WorkerConfig; requestId?: string; result?: unknown; error?: string; input?: RuntimeInput }

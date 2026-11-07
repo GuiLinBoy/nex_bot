@@ -181,6 +181,8 @@ export class TaskRuntime {
     if (this.closing || this.workers.has(taskId)) return;
     const task = this.store.get("SELECT * FROM tasks WHERE id=? AND ended_at IS NULL", taskId);
     if (!task || !["queued", "running"].includes(String(task.status))) return;
+    try { this.store.acceptance.ready(String(task.bot_id)); }
+    catch (error) { this.finishTask(taskId, 'failed', error instanceof Error ? error.message : '验收不可用'); return; }
     const occurrence = this.store.get("SELECT id,expires_at FROM routine_occurrences WHERE task_id=?", taskId);
     // Lateness limits the first execution, not recovery of already-started work.
     // Check after authorization as a login/capacity wait may outlive the window.
@@ -244,8 +246,11 @@ export class TaskRuntime {
       const groups=new Map<string,Row[]>();for(const row of rows){const key=String(row.task_id);groups.set(key,[...(groups.get(key)??[]),row]);}
       for(const group of groups.values()){const size=tokens(group);if(size>remaining)break;remaining-=size;history.unshift(...group.reverse().map(row=>({ref:'message:'+row.id,role:String(row.role),content:String(row.content)})));}
     }
-    const episode = this.episodes.boundary(taskId);
+    const scoped = !!this.store.acceptance.member(String(task.bot_id));
+    if (scoped) model.maxOutputTokens = Math.min(model.maxOutputTokens, 4096);
+    const episode = scoped ? undefined : this.episodes.boundary(taskId);
     const config: WorkerConfig = { taskId, conversationId: String(task.conversation_id), runtimeId, generation, dir: workerDir, ...model, tidyWindow: this.tidyModel(String(task.bot_id)).contextWindow, calibration: this.store.calibration.ratio(scope), blocked: [...this.failures.blocked(runtimeId)], entries,history, inputs: this.store.pending(taskId).map((r) => this.inputRecord(r)), ...(episode ? { episode } : {}), ...this.promptParts(taskId) };
+    if (scoped) config.acceptance = true;
     child.send({ type: "start", config });
     // The recall of the user's input runs while the worker starts; the first model request waits for it (at most a
     // few seconds) and every later request of the task carries the same block.
@@ -404,6 +409,7 @@ export class TaskRuntime {
     const last = this.store.get("SELECT id,bot_id FROM tasks WHERE conversation_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", conversationId);
     if (!runtime || !last) return;
     const botId = String(last.bot_id);
+    if (this.store.acceptance.member(botId)) return;
     if (this.store.all("SELECT plan_json FROM memory_forget_rules WHERE status='pending'").some((rule) => (JSON.parse(String(rule.plan_json)) as ForgetPlan).bots.includes(botId))) return;
     if (maintainUsage(this.store, conversationId) >= MAINTAIN_DAILY_TOKENS || this.maintenancePaused(conversationId)) return;
     let model: ReturnType<CoreStore["modelConfig"]>, prompts: ReturnType<TaskRuntime["promptParts"]>;
@@ -524,7 +530,8 @@ export class TaskRuntime {
     if (!bot) throw new Error("Agent 不存在");
     const fullAccess = this.store.get("SELECT mode FROM agent_approval_settings WHERE bot_id=?", bot.id)?.mode === "full";
     const profile = { id: bot.id, name: bot.name, instructions: bot.instructions, version: bot.version };
-    const allDirectory = directory(this.store);
+    const member = this.store.acceptance.member(String(bot.id));
+    const allDirectory = directory(this.store).filter(peer => !member || this.store.acceptance.member(String(peer.id))?.scope_id === member.scope_id);
     // Availability and the directory revision change whenever any peer starts or ends a task; they go to the volatile block.
     const others = allDirectory.filter((peer) => peer.id !== bot.id);
     const peers = others.map(({ availability: _availability, directory_version: _revision, ...peer }) => ({ ...peer, instructions: String(peer.instructions).slice(0, 2000), description: String(peer.description).slice(0, 2000) }));
@@ -588,7 +595,7 @@ ${commonToolPrompt(capabilities)}
   }
   async event(worker: Running, event: WorkerEvent) {
     this.assert(worker);
-    if (["request", "tool", "compact"].includes(event.type)) await this.requireIdentity(worker);
+    if (["request", "dispatch", "tool", "compact"].includes(event.type)) await this.requireIdentity(worker);
     if (event.type === "delta") { worker.streaming += event.text ?? ""; this.changed(); return; }
     if (event.type === "error") { this.fail(worker, new Error(event.error ?? "运行错误")); return; }
     this.persist(worker, event);
@@ -598,6 +605,9 @@ ${commonToolPrompt(capabilities)}
       this.reply(worker,event.requestId,await this.summarize({botId:String(task.bot_id),conversationId:String(task.conversation_id),runtimeId:worker.runtimeId,owner:String(task.id),taskId:worker.taskId,purpose:'compact',signal:worker.controller.signal,recheck:async()=>{this.assert(worker);await this.requireIdentity(worker);}},event));return;
     }
     if (event.type === "snapshot" && event.invokeId) {
+      if (event.quotaExceeded) this.store.acceptance.quotaError(String(this.assert(worker).bot_id), event.invokeId);
+      const attempt = this.store.get('SELECT id FROM acceptance_attempts WHERE request_key=? AND bot_id=?', event.invokeId, this.assert(worker).bot_id);
+      if (attempt) this.store.acceptance.settle(String(attempt.id), event.modelStatus === 'succeeded' && event.inputTokens !== undefined && event.outputTokens !== undefined);
       this.store.run('UPDATE model_invocations SET cache_read=?,cache_write=? WHERE id=? AND run_id=?',event.cacheRead??null,event.cacheWrite??null,event.invokeId,worker.runId);
       if (event.inputTokens !== undefined && event.outputTokens !== undefined) {
         const known = !(event.modelStatus && event.modelStatus !== "succeeded" && event.inputTokens === 0 && event.outputTokens === 0);
@@ -608,6 +618,8 @@ ${commonToolPrompt(capabilities)}
       else this.store.run("UPDATE model_invocations SET status='succeeded',finished_at=? WHERE id=? AND run_id=? AND status='in_flight'", now(), event.invokeId, worker.runId);
     }
     if (event.type === "request" && event.requestId) {
+      this.store.acceptance.ready(String(this.assert(worker).bot_id));
+      if (event.purpose === 'compact') this.store.acceptance.denyAuxiliary(String(this.assert(worker).bot_id));
       // The recall of the user's input was started with the run; this waits for it once and then reads it back unchanged.
       const recall = event.purpose === "compact" ? undefined : await this.recalls.ensure(this.assert(worker), worker.controller.signal);
       await this.requireIdentity(worker);
@@ -618,6 +630,17 @@ ${commonToolPrompt(capabilities)}
       this.store.run('UPDATE model_invocations SET memory_tokens=? WHERE id=?',recall?.tokens ?? 0,invokeId);
       const { systemPrompt, volatilePrompt } = this.promptParts(worker.taskId);
       this.reply(worker, event.requestId, { invokeId, systemPrompt, volatilePrompt } satisfies ModelPermit);
+    }
+    if (event.type === 'dispatch' && event.requestId) {
+      const task = this.assert(worker);
+      if (!event.invokeId || !this.store.get("SELECT id FROM model_invocations WHERE id=? AND run_id=? AND status='in_flight'", event.invokeId, worker.runId)) throw new Error('模型请求许可失效');
+      this.store.acceptance.reserve(String(task.bot_id), event.invokeId, event.payload);
+      this.reply(worker, event.requestId, { allowed: true });
+    }
+    if (event.type === 'quota' && event.requestId) {
+      const task = this.assert(worker);
+      this.store.acceptance.quotaError(String(task.bot_id), String(event.invokeId));
+      this.reply(worker, event.requestId, { stopped: true });
     }
     if (event.type === "tool" && event.requestId) {
       const call = this.propose(worker, event);
@@ -660,7 +683,9 @@ ${commonToolPrompt(capabilities)}
     const callId = id(), target = action.startsWith("memory.") ? "memory" : action.startsWith("device.") && action !== "device.inventory" ? "device" : "connector";
     const forget = action === "memory.forget" ? this.memory.privacy.preview(String(task.bot_id), args) : undefined;
     const targetId = action === "html.render" ? String(task.bot_id) : action.startsWith("image.") ? action : action === "attachment.read" ? text(args.attachmentId,100) : action === "connector.list" ? action : action.startsWith("connector.") ? text(args.connectorId, 100) : target === "memory" ? (typeof args.documentId === "string" ? args.documentId : action === "memory.write" ? id() : action === "memory.core.update" ? "core-memory" : action === "memory.topic" ? "memory-topic" : "memory-search") : target === "device" ? text(args.deviceId, 100) : action.startsWith("todo.") ? String(args.todoId ?? task.bot_id) : action.startsWith("routine.") ? String(args.routineId ?? task.bot_id) : ["tool.search", "agent.directory", "agent.create", "device.inventory", "skill.list", "skill.read"].includes(action) ? action : text(args.botId, 100);
-    const envelope = canonical({ version: 1, callId, botId: task.bot_id, taskId: task.id, capability: action, targetId, arguments: args });
+    const acceptanceExecution = this.store.acceptance.execution(String(task.bot_id), args);
+    const acceptanceRead = this.store.acceptance.reading(String(task.bot_id), args);
+    const envelope = canonical({ version: 1, callId, botId: task.bot_id, taskId: task.id, capability: action, targetId, arguments: args, ...(acceptanceExecution ? { acceptanceExecution } : {}), ...(acceptanceRead ? { acceptanceRead } : {}) });
     this.store.transaction(() => {
       this.store.insert("tool_calls", { id: callId, task_id: task.id, run_id: worker.runId, ...this.store.scope(), conversation_id: task.conversation_id, bot_id: task.bot_id, runtime_session_id: worker.runtimeId, assistant_entry_id: event.entryId!, provider_tool_call_id: event.providerId!, tool_name: action, tool_version: "1", target_kind: target, target_id: targetId, arguments_json: canonical(args), canonical_envelope: envelope, argument_hash: hash(envelope), status: ask ? "awaiting_approval" : "ready", authorization_snapshot_json: JSON.stringify({ policyVersion: policy.version, localPolicyVersion: localGrant?.policy_version ?? null, ...(forget ? { forgetRevision: forget.revision, forgetCounts: { documents: forget.documents.length, messages: forget.messages.length, tasks: forget.tasks.length } } : {}) }), created_at: now() });
       if (ask) {
@@ -819,7 +844,7 @@ ${commonToolPrompt(capabilities)}
       else if (call.tool_name === "memory.write") result = this.memory.write(String(call.bot_id), { ...args, documentId: call.target_id }, String(call.id));
       else if (call.tool_name === "memory.delete") { this.memory.remove(text(args.documentId, 100), Number(args.expectedVersion)); result = { deleted: true }; }
       else if (call.tool_name === "memory.forget") result = this.memory.forget(String(call.bot_id), args, String(JSON.parse(String(call.authorization_snapshot_json)).forgetRevision));
-      else if (call.tool_name === "agent.directory") result = { agents: directory(this.store).filter((peer) => peer.id !== call.bot_id) };
+      else if (call.tool_name === "agent.directory") result = { agents: directory(this.store).filter((peer) => peer.id !== call.bot_id && this.store.acceptance.sameDirectory(String(call.bot_id), String(peer.id))) };
       else if ((call.tool_name === "agent.create" || call.tool_name === "agent.update") && this.agentExecutor) result = this.agentExecutor(call, args);
       else if (call.tool_name === "device.inventory") result = { devices: this.deviceDirectory?.() ?? [], currentClient: this.currentClient(String(call.task_id)) };
       else if (call.tool_name === "skill.list") result = { skills: skillList(this.store, String(call.bot_id)) };
@@ -889,6 +914,7 @@ ${commonToolPrompt(capabilities)}
       if (depth > 3 || ancestry.has(target)) { this.resolveCall(call, { error: "委派深度超限或形成循环" }, true, worker); return; }
       this.store.transaction(() => {
         const conversation = this.store.createConversation(target, `来自 ${this.store.get("SELECT name FROM bots WHERE id=?", call.bot_id)!.name} 的委派`);
+        this.store.acceptance.bindDelegation(String(call.bot_id), target, conversation);
         const childTaskId = this.store.accept(conversation, `这是委派子任务。只处理以下目标，将结果返回主 Agent：\n${message}`, `a2a:${call.id}`, String(this.store.get("SELECT authorized_session_id FROM tasks WHERE id=?", call.task_id)!.authorized_session_id));
         this.store.insert("a2a_messages", { id: id(), call_id: call.id, parent_task_id: call.task_id, sender_bot_id: call.bot_id, receiver_bot_id: target, child_conversation_id: conversation, child_task_id: childTaskId, root_task_id: root, depth, status: "queued", payload: message, created_at: now() });
         if (topic) this.memory.personal.tree.noteDelegation(String(call.task_id), topic, target, String(call.id));
@@ -919,6 +945,7 @@ ${commonToolPrompt(capabilities)}
     }
   }
   finishTask(taskId: string, status: string, result: string) {
+    if (status !== 'succeeded') this.store.acceptance.unknownTask(taskId);
     this.store.transaction(() => {
       this.store.run("UPDATE tasks SET status=?,result_summary=?,ended_at=?,version=version+1 WHERE id=? AND ended_at IS NULL", status, result, now(), taskId);
       this.onSettled?.(taskId);
@@ -947,6 +974,7 @@ ${commonToolPrompt(capabilities)}
       // Fence the entire subtree in one transaction before any process exits.
       // Crash recovery must never restart a descendant of a manually stopped task.
       for (const target of tasks) {
+        this.store.acceptance.unknownTask(target);
         this.store.run("UPDATE tasks SET status='cancelling',result_summary=?,run_generation=run_generation+1 WHERE id=? AND ended_at IS NULL", reason, target);
         this.store.run("UPDATE approvals SET status='cancelled' WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE task_id=?) AND status IN ('pending','approved')", target);
         this.store.run("UPDATE tool_calls SET status=CASE WHEN status='executing' AND tool_name IN ('device.exec','device.computer','connector.call') THEN 'unknown' ELSE 'cancelled' END WHERE task_id=? AND status IN ('ready','awaiting_approval','executing')", target);

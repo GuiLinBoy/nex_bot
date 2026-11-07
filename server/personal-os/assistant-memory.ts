@@ -64,6 +64,7 @@ export class AssistantMemory {
     return { ...settings, model: this.globalSettings().model };
   }
   enabled(botId: string) {
+    if (this.store.acceptance.member(botId)) return false;
     const policy = this.store.get('SELECT * FROM bot_policies WHERE bot_id=?', botId);
     return !!this.globalSettings().enabled && !!this.settings(botId).enabled && !!policy && this.store.get('SELECT status FROM bots WHERE id=?',botId)?.status==='active' && policyTools(policy).includes('memory.search');
   }

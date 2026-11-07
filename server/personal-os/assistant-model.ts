@@ -36,6 +36,7 @@ interface CompletionArgs { botId: string; taskId?: string; conversationId?: stri
 export async function assistantCompletion(store: CoreStore, args: CompletionArgs & { allowTruncated: true }): Promise<{ text: string; truncated: boolean }>;
 export async function assistantCompletion(store: CoreStore, args: CompletionArgs & { allowTruncated?: false }): Promise<string>;
 export async function assistantCompletion(store: CoreStore, args: CompletionArgs & { allowTruncated?: boolean }): Promise<string | { text: string; truncated: boolean }> {
+  store.acceptance.denyAuxiliary(args.botId);
   const model = store.modelConfig(args.botId);
   if (args.model) model.model = args.model;
   const limits = store.modelLimitSettings(model);

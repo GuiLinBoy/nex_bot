@@ -21,6 +21,7 @@ import { ModelCalibration } from "./calibration.ts";
 import { ModelLimits, modelLimitScope, parseModelLimit, validateModelLimits, type ModelCatalogConfig, type ModelLimitOverrides } from "./model-limits.ts";
 
 import { todoSchema } from "./todo-schema.ts";
+import { AcceptanceBudget, acceptanceSchema, acceptancePrepaidSchema } from './acceptance.ts';
 
 export type Row = Record<string, string | number | null>;
 export const id = () => randomUUID();
@@ -70,6 +71,7 @@ export class CoreStore {
   readonly session = "desktop-owner";
   readonly modelLimits: ModelLimits;
   readonly calibration = new ModelCalibration(this);
+  readonly acceptance: AcceptanceBudget;
   constructor(dir: string, readonly key: Buffer, token: string, catalog?: ModelCatalogConfig) {
     if (key.length !== 32) throw new Error("Invalid credential vault key");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -425,6 +427,15 @@ CREATE INDEX IF NOT EXISTS assistant_usage_maintain ON assistant_usage(conversat
       this.db.exec(schema);
       this.insert("schema_migrations", { version: 42, checksum: hash(schema), applied_at: now() });
     });
+    if (!this.get('SELECT version FROM schema_migrations WHERE version=43')) this.transaction(() => {
+      this.db.exec(acceptanceSchema);
+      this.insert('schema_migrations', { version: 43, checksum: hash(acceptanceSchema), applied_at: now() });
+    });
+    if (!this.get('SELECT version FROM schema_migrations WHERE version=44')) this.transaction(() => {
+      this.db.exec(acceptancePrepaidSchema);
+      this.insert('schema_migrations', { version: 44, checksum: hash(acceptancePrepaidSchema), applied_at: now() });
+    });
+    this.acceptance = new AcceptanceBudget(this);
     this.db.exec("PRAGMA secure_delete=ON;");
   }
   scope() { return { workspace_id: this.workspace, owner_user_id: this.owner }; }
@@ -563,6 +574,8 @@ CREATE INDEX IF NOT EXISTS assistant_usage_maintain ON assistant_usage(conversat
     if (old) { if (old.request_hash !== requestHash) throw new Error("消息标识已用于不同内容"); return String(old.task_id); }
     const conv = this.get("SELECT * FROM conversations WHERE id=? AND status='open'", conversationId);
     if (!conv) throw new Error("对话不存在");
+    if (!this.acceptance.ownsConversation(String(conv.bot_id), conversationId)) throw new Error('验收必须使用绑定的独立对话');
+    this.acceptance.ready(String(conv.bot_id));
     this.modelConfig();
     return this.transaction(() => {
       let task = this.get("SELECT * FROM tasks WHERE conversation_id=? AND ended_at IS NULL", conversationId);

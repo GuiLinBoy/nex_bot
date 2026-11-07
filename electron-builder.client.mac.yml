@@ -12,6 +12,7 @@ electronDist: dist-personal/electron
 asar: true
 files:
   - electron/nex-client-main.mjs
+  - electron/nex-acceptance-bridge.mjs
   - electron/nex-client-preload.cjs
   - electron/nex-client-ui.mjs
   - electron/nex-client-device.mjs

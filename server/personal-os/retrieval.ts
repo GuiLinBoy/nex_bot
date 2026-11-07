@@ -124,6 +124,7 @@ export class Retrieval {
 
   /** Runs a model call and records it in assistant_usage (purpose embed / rerank; budgeted separately from memory maintenance). */
   private async recorded<T extends { tokens: number | null }>(args: { botId: string; taskId?: string; purpose: 'embed' | 'rerank'; model: string; reserved: number }, run: () => Promise<T>): Promise<T> {
+    this.store.acceptance.denyAuxiliary(args.botId);
     const usage = id();
     this.store.insert('assistant_usage', { id: usage, bot_id: args.botId, task_id: args.taskId ?? null, purpose: args.purpose, model: args.model || '(default)', status: 'running', reserved_tokens: args.reserved, created_at: now() });
     try {

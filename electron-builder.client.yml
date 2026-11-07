@@ -4,14 +4,19 @@ directories:
   output: release/personal-client
 extraMetadata:
   name: nexbot-client
-  version: 0.9.25
+  version: 0.9.29
+  buildVersion: 0.9.29.1108
   main: electron/nex-client-main.mjs
 npmRebuild: false
 electronVersion: 39.8.10
 electronDist: dist-personal/electron
 asar: true
+asarUnpack:
+  - electron/acceptance-pipe-server.ps1
 files:
   - electron/nex-client-main.mjs
+  - electron/nex-acceptance-bridge.mjs
+  - electron/acceptance-pipe-server.ps1
   - electron/nex-client-preload.cjs
   - electron/nex-client-ui.mjs
   - electron/nex-client-device.mjs
@@ -43,4 +48,4 @@ win:
 portable:
   useZip: true
   unpackDirName: true
-  artifactName: NexBot-${version}-x64-Client-Portable.${ext}
+  artifactName: NexBot-${version}-prepaid-main-x64-Client-Portable.${ext}

@@ -27,7 +27,7 @@ export class ChatFiles {
     if ((encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))) throw new Error("文件编码无效");
     const bytes = Buffer.from(encoded, "base64");
     if (!bytes.length || bytes.length > attachmentLimit) throw new Error("文件不能超过 5 MB");
-    this.store.run("DELETE FROM chat_attachments WHERE message_id IS NULL AND created_at<? AND NOT EXISTS(SELECT 1 FROM transcript t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=chat_attachments.bot_id AND t.source_key LIKE 'image:%' AND instr(t.content,'/api/attachments/'||chat_attachments.id)>0)", now() - 86400_000);
+    if (!this.store.acceptance.member(botId)) this.store.run("DELETE FROM chat_attachments WHERE message_id IS NULL AND created_at<? AND NOT EXISTS(SELECT 1 FROM transcript t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=chat_attachments.bot_id AND t.source_key LIKE 'image:%' AND instr(t.content,'/api/attachments/'||chat_attachments.id)>0)", now() - 86400_000);
     if (Number(this.store.get("SELECT COALESCE(SUM(size),0) n FROM chat_attachments")?.n) + bytes.length > 200 * 1024 * 1024) throw new Error("附件空间已满");
     const mime = bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? "image/png" : bytes[0] === 255 && bytes[1] === 216 ? "image/jpeg" : bytes.subarray(0, 4).toString() === "%PDF" ? "application/pdf" : bytes.subarray(0,4).toString() === "RIFF" && bytes.subarray(8,12).toString() === "WEBP" ? "image/webp" : "application/octet-stream";
     const file = { id: id(), botId, name, mime, size: bytes.length };

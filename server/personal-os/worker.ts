@@ -409,7 +409,7 @@ async function main(value: WorkerConfig) {
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") send({ type: "delta", text: event.assistantMessageEvent.delta });
     if (event.type === "message_end" && event.message.role === "assistant") {
-      send({ type: "snapshot", invokeId: activeInvoke, inputTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite, estimatedTokens: requestEstimate, cacheRead:event.message.usage.cacheRead,cacheWrite:event.message.usage.cacheWrite,outputTokens: event.message.usage.output, modelStatus: event.message.stopReason === "error" ? "failed" : event.message.stopReason === "aborted" ? "cancelled" : "succeeded" });
+      send({ type: "snapshot", invokeId: activeInvoke, quotaExceeded: config.acceptance && event.message.stopReason === 'error' && /insufficient[_ -](?:quota|balance|credit)|quota[_ -](?:exceeded|exhausted)|余额不足|额度不足|配额不足/i.test(event.message.errorMessage ?? ''), inputTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite, estimatedTokens: requestEstimate, cacheRead:event.message.usage.cacheRead,cacheWrite:event.message.usage.cacheWrite,outputTokens: event.message.usage.output, modelStatus: event.message.stopReason === "error" ? "failed" : event.message.stopReason === "aborted" ? "cancelled" : "succeeded" });
     }
   });
   const originalFetch = globalThis.fetch, endpoint = new URL(config.endpoint);
@@ -452,9 +452,26 @@ async function main(value: WorkerConfig) {
         else payload.max_tokens=Math.min(Number(payload.max_tokens??config.maxOutputTokens),available);
         body=JSON.stringify(payload);
       }
+      if (config.acceptance) {
+        if (typeof body !== 'string') throw new Error('验收请求格式无效');
+        await rpc({ type: 'dispatch', invokeId: activeInvoke, payload: JSON.parse(body) });
+      }
       sending = true;
       const response = await originalFetch(input, { ...init, body, redirect: "error", signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000) });
       if (!response.ok) httpFailure = { status: response.status, address: url.origin + url.pathname };
+      if (config.acceptance && (!response.ok || response.headers.get('content-type')?.includes('application/json'))) {
+        let quota = response.status === 402 || response.status === 429;
+        if (!quota) {
+          const reader = response.clone().body?.getReader();
+          const decoder = new TextDecoder(); let detail = '', size = 0;
+          try { while (reader && size < 16384) { const part = await reader.read(); if (part.done) break; const bytes = part.value.subarray(0, 16384 - size); size += bytes.length; detail += decoder.decode(bytes, { stream: true }); } detail += decoder.decode(); }
+          finally { if (reader) void reader.cancel().catch(() => {}); }
+          // Examine only a structured error on HTTP 200, never generated text.
+          if (response.ok) { try { const value = JSON.parse(detail); detail = JSON.stringify(value.error ?? (value.code ? { code: value.code, message: value.message } : {})); } catch { detail = ''; } }
+          quota = /insufficient[_ -](?:quota|balance|credit)|quota[_ -](?:exceeded|exhausted)|credit[_ -](?:exhausted|insufficient)|余额不足|额度不足|配额不足/i.test(detail);
+        }
+        if (quota) await rpc({ type: 'quota', invokeId: activeInvoke });
+      }
       return response;
     } catch (error) {
       // Provider SDKs flatten fetch exceptions (including Core's budget or

@@ -67,7 +67,7 @@ export class DeviceGateway {
           if (!Number.isSafeInteger(version) || version < 1) throw new Error("Invalid local policy");
           const supplied = event.identity && typeof event.identity === "object" ? event.identity as Record<string, unknown> : {};
           const identity = { hostname: typeof supplied.hostname === "string" ? supplied.hostname.slice(0, 255) : "", os: typeof supplied.os === "string" ? supplied.os.slice(0, 80) : "", release: typeof supplied.release === "string" ? supplied.release.slice(0, 100) : "", architecture: typeof supplied.architecture === "string" ? supplied.architecture.slice(0, 30) : "", supported: Array.isArray(supplied.supported) ? supplied.supported.filter((action) => ["device.info", "device.read", "device.list", "device.exec", "device.agent", "device.computer"].includes(String(action))) : ["device.read", "device.list", "device.exec"] };
-          const scope = { root: "shared", info: identity.supported.includes("device.info"), read: event.read !== false, exec: event.exec === true, agent: event.exec === true && identity.supported.includes("device.agent"), computer: event.computer === true && identity.supported.includes("device.computer"), identity };
+          const scope = { root: "shared", info: identity.supported.includes("device.info"), read: event.read !== false, exec: event.exec === true, agent: event.exec === true && identity.supported.includes("device.agent"), computer: event.computer === true && identity.supported.includes("device.computer"), identity, ...(event.acceptanceExec === 1 ? { acceptanceExec: 1 } : {}) };
           this.store.run("UPDATE devices SET capabilities_json=?,last_seen_at=?,platform=? WHERE id=?", JSON.stringify([...(scope.info ? ["device.info"] : []), ...(scope.read ? ["device.read", "device.list"] : []), ...(scope.exec ? ["device.exec"] : []), ...(scope.agent ? ["device.agent"] : []), ...(scope.computer ? ["device.computer"] : [])]), now(), ["windows", "macos", "linux"].includes(String(event.platform)) ? String(event.platform) : "windows", deviceId);
           this.store.run("INSERT INTO device_local_grants(device_id,local_grant_id,workspace_id,owner_user_id,policy_version,scope_json,status,reported_at) VALUES(?,'shared',?,?,?,?, 'active',?) ON CONFLICT(device_id,local_grant_id) DO UPDATE SET policy_version=excluded.policy_version,scope_json=excluded.scope_json,status='active',reported_at=excluded.reported_at", deviceId, this.store.workspace, this.store.owner, version, JSON.stringify(scope), now());
           this.store.run("UPDATE device_grants SET status='stale' WHERE device_id=? AND local_policy_version!=?", deviceId, version);
@@ -132,6 +132,8 @@ export class DeviceGateway {
     const deviceId = String(call.target_id), ws = this.sockets.get(deviceId), local = this.store.get("SELECT * FROM device_local_grants WHERE device_id=? AND local_grant_id='shared' AND status='active'", deviceId);
     if (!ws || ws.readyState !== WebSocket.OPEN || !local) throw new Error(!ws || ws.readyState !== WebSocket.OPEN ? "设备离线，请确认设备上的 NexBot 已登录并在线" : "设备没有本地授权，请在设备上开启本机控制");
     if (local.policy_version !== JSON.parse(String(call.authorization_snapshot_json)).localPolicyVersion) throw new Error("设备本地权限版本已变化，旧批准无效");
+    const source = JSON.parse(String(call.canonical_envelope));
+    if ((source.acceptanceExecution || source.acceptanceRead) && JSON.parse(String(local.scope_json)).acceptanceExec !== 1) throw new Error('设备不支持受限验收执行，未发送命令');
     if (call.tool_name === "device.exec" && !JSON.parse(String(local.scope_json)).exec) throw new Error("设备未启用终端能力");
     if (call.tool_name === "device.agent" && !JSON.parse(String(local.scope_json)).agent) throw new Error("目标设备尚不支持本地 Agent，请更新客户端并开启本机控制");
     if (call.tool_name === "device.computer" && !JSON.parse(String(local.scope_json)).computer) throw new Error("设备未启用屏幕控制");
@@ -140,10 +142,16 @@ export class DeviceGateway {
     if (old?.status === "unknown") { this.store.run("UPDATE tool_calls SET status='unknown' WHERE id=?", call.id); throw new Error("设备执行结果未知，禁止重放"); }
     if (this.store.get("SELECT id FROM device_calls WHERE device_id=? AND status='unknown' AND id!=?", deviceId, call.id)) throw new Error("设备上有一次结果未知的调用，需在设备上核实后才能继续执行");
     if (this.store.get("SELECT id FROM device_calls WHERE device_id=? AND status IN ('delivered','running') AND id!=?", deviceId, call.id)) throw new Error("设备仍在执行上一项调用，请稍后重试");
-    const deadline = now() + DEVICE_LEASE_MS, grantId = id();
+    const requestedTimeout = source.acceptanceExecution?.timeoutMs;
+    if (requestedTimeout !== undefined && (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 1 || requestedTimeout > 3600000)) throw new Error('验收执行时限无效');
+    // The frozen DCP schema retains its <=30s delivery lease. A separately
+    // trusted scoped execution can run longer after starting within that lease.
+    const leaseMs = DEVICE_LEASE_MS, issuedAt = now();
+    const deliveryExpires = issuedAt + leaseMs;
+    const deadline = issuedAt + Math.max(leaseMs, (requestedTimeout ?? 20000) + 5000), grantId = id();
     if (!old) this.store.transaction(() => {
       this.store.insert("device_grants", { id: grantId, ...this.store.scope(), bot_id: call.bot_id, device_id: deviceId, local_grant_id: "shared", local_policy_version: local.policy_version, scope_json: local.scope_json, status: "active", created_at: now(), expires_at: deadline });
-      this.store.insert("device_calls", { id: call.id, ...this.store.scope(), bot_id: call.bot_id, device_id: deviceId, grant_id: grantId, local_grant_id: "shared", grant_version: 1, local_policy_version: local.policy_version, status: "delivered", delivery_count: 1, lease_seq: 1, lease_issued_at: now(), lease_expires_at: deadline, deadline_at: deadline, created_at: now() - 1 });
+      this.store.insert("device_calls", { id: call.id, ...this.store.scope(), bot_id: call.bot_id, device_id: deviceId, grant_id: grantId, local_grant_id: "shared", grant_version: 1, local_policy_version: local.policy_version, status: "delivered", delivery_count: 1, lease_seq: 1, lease_issued_at: issuedAt, lease_expires_at: deliveryExpires, deadline_at: deadline, created_at: issuedAt - 1 });
     });
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -152,9 +160,9 @@ export class DeviceGateway {
         this.store.run("UPDATE tool_calls SET status='unknown' WHERE id=? AND result_json IS NULL", call.id);
         reject(new Error("设备未返回确认，结果未知；不会自动再次执行"));
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "reconcile", calls: [{ id: call.id, argument_hash: call.argument_hash }] }));
-      }, 35_000);
+      }, Math.max(35000, (requestedTimeout ?? 20000) + 15000));
       this.pending.set(String(call.id), { resolve, reject, timer, deviceId });
-      ws.send(JSON.stringify({ type: "call", callId: call.id, canonicalEnvelope: call.canonical_envelope, argumentHash: call.argument_hash, localPolicyVersion: local.policy_version, leaseSeq: 1, leaseMs: DEVICE_LEASE_MS, leaseExpiresAt: deadline, deadlineAt: deadline, args }));
+      ws.send(JSON.stringify({ type: "call", callId: call.id, canonicalEnvelope: call.canonical_envelope, argumentHash: call.argument_hash, localPolicyVersion: local.policy_version, leaseSeq: 1, leaseMs, leaseExpiresAt: deliveryExpires, deadlineAt: deadline, args }));
     });
   }
   cancelTask(taskId: string) {

@@ -154,6 +154,7 @@ export class TaskRecall {
   }
   /** The recall itself, then the bookkeeping the privacy closure needs: which sources this task has seen. */
   private async compute(task: Row, source: { query: string; seq: number }, signal?: AbortSignal): Promise<RecalledBlock> {
+    if (this.store.acceptance.member(String(task.bot_id))) return { block: '', tokens: 0, status: 'skipped', refs: [], inputSeq: source.seq };
     const used = { documents: [] as string[], legacy: [] as string[] };
     const value = await this.recall(task, source, used, signal);
     try { this.memory.consume(String(task.id), used.legacy, used.documents); } catch { /* the task may be gone */ }

@@ -9,6 +9,7 @@ import os from "node:os";
 import { ComputerExecutor } from "./computer.ts";
 import { DEVICE_LEASE_MS } from "./devices.ts";
 import { LocalAgentSessions } from "./local-agent.ts";
+import { executeAcceptance, readAcceptance, type AcceptanceExecution } from './acceptance-execution.ts';
 
 /** A call whose absolute lease is staler than this means the device clock is badly wrong, not merely drifting. */
 const CLOCK_SKEW_TOLERANCE_MS = 5 * 60_000;
@@ -113,7 +114,7 @@ export class DeviceNode {
     const endpoint = new URL(this.config.origin); endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:"; endpoint.pathname = "/dcp/v1/connect";
     const ws = new WebSocket(endpoint, { headers: { Authorization: `Bearer ${this.config.token}` }, maxPayload: 8 * 1024 * 1024, handshakeTimeout: 10_000 });
     this.socket = ws; this.status = "连接中"; this.changed();
-    ws.on("open", () => { if (this.socket !== ws || this.stopping) return; ws.send(JSON.stringify({ type: "hello", policyVersion: this.config!.policyVersion, read: !!this.config!.root, exec: this.config!.exec, agent: this.config!.exec, computer: this.config!.computer === true && this.computer.available(), identity: this.identity(), platform: this.identity().platform })); });
+    ws.on("open", () => { if (this.socket !== ws || this.stopping) return; ws.send(JSON.stringify({ type: "hello", acceptanceExec: 1, policyVersion: this.config!.policyVersion, read: !!this.config!.root, exec: this.config!.exec, agent: this.config!.exec, computer: this.config!.computer === true && this.computer.available(), identity: this.identity(), platform: this.identity().platform })); });
     ws.on("message", (raw) => { try { const operation = this.message(ws, JSON.parse(raw.toString())).catch(() => ws.close(1008, "Invalid command")); this.operations.add(operation); void operation.finally(() => this.operations.delete(operation)); } catch { ws.close(1008, "Invalid message"); } });
     ws.on("error", () => { if (this.socket !== ws || this.stopping) return; this.status = "连接失败，检查 Core 地址和配对令牌"; this.changed(); });
     ws.on("close", () => {
@@ -182,7 +183,10 @@ export class DeviceNode {
     // absolute `leaseExpiresAt` is only checked for being wildly stale.
     const received = now(), expires = Number(event.leaseExpiresAt), deadline = Number(event.deadlineAt), leaseSeq = Number(event.leaseSeq);
     const leaseMs = event.leaseMs === undefined ? DEVICE_LEASE_MS : Number(event.leaseMs);
-    if (!Number.isSafeInteger(expires) || !Number.isSafeInteger(deadline) || !Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > DEVICE_LEASE_MS || deadline < expires || !Number.isSafeInteger(leaseSeq) || leaseSeq < 1) return this.refuse(ws, callId, digest, "执行租约无效，未启动操作");
+    const executionTimeout = (source.acceptanceExecution as AcceptanceExecution | undefined)?.timeoutMs;
+    if (executionTimeout !== undefined && (!Number.isSafeInteger(executionTimeout) || executionTimeout < 1 || executionTimeout > 3600000)) return this.refuse(ws, callId, digest, '验收执行时限无效');
+    const maxLease = DEVICE_LEASE_MS;
+    if (!Number.isSafeInteger(expires) || !Number.isSafeInteger(deadline) || !Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > maxLease || deadline < expires || !Number.isSafeInteger(leaseSeq) || leaseSeq < 1) return this.refuse(ws, callId, digest, "执行租约无效，未启动操作");
     if (expires < received - CLOCK_SKEW_TOLERANCE_MS) return this.refuse(ws, callId, digest, "设备系统时钟与 Core 相差超过 5 分钟，请校准系统时间；未启动操作");
     const leaseEnd = received + leaseMs;
     const capability = text(source.capability, 50), args = source.arguments as Record<string, unknown>;
@@ -206,8 +210,13 @@ export class DeviceNode {
         failed = (result as { isError?: boolean }).isError === true;
       } else if (capability === "device.exec") {
         if (!this.config.exec) throw new Error("设备未授权终端");
-        result = await this.command(text(args.command, 8192), root || os.homedir(), Math.min(20_000, leaseEnd - now()), controller.signal);
+        result = source.acceptanceExecution
+          ? await executeAcceptance(source.acceptanceExecution as AcceptanceExecution, executionTimeout ?? 20000, controller.signal)
+          : await this.command(text(args.command, 8192), root || os.homedir(), Math.min(20_000, leaseEnd - now()), controller.signal);
         failed = !!(result as { error?: string }).error;
+      } else if (capability === 'device.read' && source.acceptanceRead) {
+        if (!root) throw new Error('设备未授权文件目录');
+        result = readAcceptance(source.acceptanceRead as Parameters<typeof readAcceptance>[0]);
       } else {
         if (!root) throw new Error("设备未授权文件目录");
         const file = confined(root, typeof args.path === "string" ? args.path : ".");

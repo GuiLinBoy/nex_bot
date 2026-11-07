@@ -71,12 +71,13 @@ export function searchTools(store: CoreStore, botId: string, args: Record<string
   }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
   const selected = ranked.slice(Number(offset), Number(offset) + Number(limit));
   const fields = toolFields.properties as Record<string, unknown>;
+  const scoped = !!store.acceptance.member(botId);
   return {
     items: selected.map(({ entry }) => ({ action: entry.action, title: entry.title, common: !!entry.brief,
-      ...(q ? { description: entry.help, parameters: { type: "object", properties: {
+      ...(q ? { description: entry.help + (scoped && entry.action === 'device.read' ? ' 验收范围仅允许固定哈希的 UTF-8 白名单文本；offset 是字符偏移，limit 为1..24000；按 nextOffset 续读直到 null，每页重新校验 SHA-256。PNG 须经附件看图。' : ''), parameters: { type: "object", properties: {
         action: { type: "string", const: entry.action },
-        ...Object.fromEntries(entry.fields.split(" ").filter(Boolean).map((key) => [key,
-          entry.action === "tool.search" && key === "limit" ? { type: "integer", minimum: 1, maximum: 10 } : fields[key]])),
+        ...Object.fromEntries((entry.fields + (scoped && entry.action === 'device.read' ? ' offset limit' : '')).split(" ").filter(Boolean).map((key) => [key,
+          entry.action === "tool.search" && key === "limit" ? { type: "integer", minimum: 1, maximum: 10 } : scoped && entry.action === 'device.read' && key === 'limit' ? { type: 'integer', minimum: 1, maximum: 24000 } : fields[key]])),
       }, required: ["action", ...entry.required.split(" ").filter(Boolean)], additionalProperties: false } } : {}),
     })),
     total: ranked.length,

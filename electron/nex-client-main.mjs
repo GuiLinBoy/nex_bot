@@ -9,6 +9,7 @@ import { ClientDevice } from "./nex-client-device.mjs";
 import { installLocalUi } from "./nex-client-ui.mjs";
 import { installClipboardImagePaste } from "./nex-client-clipboard.mjs";
 import { ClientUpdater, portableHandoff } from "./nex-client-update.mjs";
+import { startAcceptancePipe, forwardAcceptance } from './nex-acceptance-bridge.mjs';
 import { spawn } from "node:child_process";
 import { fetchModelCatalog } from "../shared/model-catalog.mjs";
 
@@ -18,6 +19,8 @@ app.setName(process.platform === "darwin" && profile ? "NexBot Client Fixture " 
 app.setPath("userData", profile ? path.resolve(profile) : path.join(app.getPath("appData"), "NexBotClient"));
 const defaultOrigin = process.env.NEX_CLIENT_DEFAULT_ORIGIN || "https://bot.nexorai.com.cn";
 let device, updater, shuttingDown = false;
+let acceptanceBridge;
+app.on('will-quit', () => { void acceptanceBridge?.close(); });
 let window, saved, origin, connectionError = "", resuming = false, loginEpoch = 0, repointed = false;
 const cancelled = Object.assign(new Error("已取消"), { cancelled: true });
 const credentials = path.join(app.getPath("userData"), "connection.bin");
@@ -118,6 +121,9 @@ else {
     window = new BrowserWindow({ width: 1240, height: 880, minWidth: 760, minHeight: 600, title: "NexBot", icon: path.join(root, "electron", "client", "nexbot-icon.png"), autoHideMenuBar: true,
       ...(process.platform === "win32" ? { titleBarStyle: "hidden", titleBarOverlay: { color: "#00000000", symbolColor: "#536174", height: 36 } } : {}),
       webPreferences: { preload: path.join(root, "electron", "nex-client-preload.cjs"), contextIsolation: true, sandbox: true, nodeIntegration: false, partition: `nex-client-${randomBytes(12).toString("hex")}` } });
+    if (process.platform === 'win32' && process.argv.includes('--acceptance-bridge')) {
+      acceptanceBridge = await startAcceptancePipe({ profile: app.getPath('userData'), dispatch: request => forwardAcceptance(window, origin, request) });
+    }
     if (process.platform === "win32") {
       // Shell-owned chrome also works with older Core UI and the offline login page.
       const chromeCss = readFileSync(path.join(root, "electron", "client", "window-chrome.css"), "utf8");

@@ -41,6 +41,7 @@ export class MemoryModule {
     return rows.slice(0, 10).map((row) => ({ id: row.id, title: row.title, scope: row.scope, bot_id: row.bot_id, version: row.version, content: row.content }));
   }
   prompt(botId: string) {
+    if (this.store.acceptance.member(botId)) return '验收范围内长期记忆已隔离。';
     if(this.personal.settings(botId).version && !this.personal.enabled(botId)) return '长期记忆已关闭；连续对话和原文历史检索仍可使用。';
     const policy = this.store.get("SELECT * FROM bot_policies WHERE bot_id=?", botId);
     if (!policy || !policyTools(policy).includes("memory.search")) return "长期记忆检索已禁用";
@@ -143,6 +144,7 @@ export class MemoryModule {
     return result;
   }
   async recall(botId: string, query: string, taskId?: string, found?: RetrievalResult) {
+    this.store.acceptance.denyAuxiliary(botId);
     if(this.personal.settings(botId).version){
       if(!this.personal.enabled(botId))return {status:'disabled',facts:[]};
       return {status:'available',facts:await this.personal.recall(botId,query,Math.min(2000,Math.floor(this.store.modelConfig(botId).contextWindow*.05)),taskId,found)};
@@ -150,6 +152,7 @@ export class MemoryModule {
     return this.ledger.client ? this.ledger.recall(botId,query) : {status:'disabled',facts:[]};
   }
   async reflect(botId: string, query: string, taskId?: string) {
+    this.store.acceptance.denyAuxiliary(botId);
     query = text(query, 1000);
     const policy = this.store.get("SELECT * FROM bot_policies WHERE bot_id=?", botId);
     if (!policy || !policyTools(policy).includes("memory.search") || (taskId && this.store.get("SELECT bot_id FROM tasks WHERE id=? AND ended_at IS NULL", taskId)?.bot_id !== botId)) throw new Error("该 Agent 无权综合记忆");

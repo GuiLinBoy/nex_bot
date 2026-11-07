@@ -19,6 +19,7 @@ export function policyTools(policy: Row): string[] {
   return [...new Set([...(parsed.inheritDefaults === true ? basicActions : configured), ...universalActions])];
 }
 export function evaluateTool(store: CoreStore, botId: string, args: Record<string, unknown>) {
+  store.acceptance.assertTool(botId, args);
   const action = text(args.action, 40);
   const policy = store.get("SELECT p.* FROM bot_policies p JOIN bots b ON b.id=p.bot_id WHERE b.id=? AND b.status='active' AND b.workspace_id=? AND b.owner_user_id=?", botId, store.workspace, store.owner);
   // memory.core.update and memory.topic are the same kind of private memory write as memory.write: one grant covers all three.
@@ -99,7 +100,8 @@ export function evaluateTool(store: CoreStore, botId: string, args: Record<strin
   const dangerous = dangerousEffect(args, connectorTool);
   const scope = dangerous ? approvalRuleScope(args) : undefined;
   const remembered = scope && store.get("SELECT id FROM agent_approval_rules WHERE bot_id=? AND action=? AND target_id=? AND operation=? AND policy_version=? AND resource_version=?", botId, scope.action, scope.target, scope.operation, policy.version, resourceVersion);
-  return { policy, local, resourceVersion, approvalRequired: !full && dangerous && !remembered };
+  const standing = store.acceptance.preauthorized(botId, args);
+  return { policy, local, resourceVersion, approvalRequired: !full && dangerous && !remembered && !standing };
 }
 export function directory(store: CoreStore) {
   const grantVersions = store.all("SELECT g.device_id,g.policy_version,g.status,g.scope_json,d.status device_status FROM device_local_grants g JOIN devices d ON d.id=g.device_id ORDER BY g.device_id");

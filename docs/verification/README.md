@@ -1,5 +1,12 @@
 # Verifying OpenMausBot
 
+- [五岗位：可信套餐次数预算与本地升级（2026-11-07）](acceptance-prepaid-20261107.md)
+- [外部验收 CLI：隐藏 PowerShell 的 UTF-8 修复（2026-11-07）](acceptance-cli-utf8-20261107.md)
+- [五岗位接入 r8：完整 Windows 本地包与精确验证（2026-11-07）](acceptance-local-exe-20261107.md)
+- [五岗位全链接入修复：最终 r7 代码与验证（2026-11-07）](acceptance-scope-final-20261107.md)
+- [五岗位 scope：预算、窄桥接与受限设备脚本实现（2026-11-07）](acceptance-scope-implementation-20261107.md)
+- [五岗位验收：业务接入与共享预算缺口（2026-11-07）](acceptance-access-budget-20261107.md)
+
 - [工具参数边界诊断：deviceId 为 null（2026-11-07）](tool-argument-boundaries-20261107.md)
 
 - [重复回复：无效工具调用循环（2026-11-07）](repeated-tool-failures-20261107.md)
